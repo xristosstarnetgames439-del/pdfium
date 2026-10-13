@@ -134,6 +134,10 @@ config("pdfium_common_config") {
 
 config("pdfium_implementation_config") {
   defines = [ "FPDF_IMPLEMENTATION" ]
+  if (pdf_is_shared_lib) {
+    # Export public C APIs while keeping internal dependencies non-component.
+    defines += [ "COMPONENT_BUILD" ]
+  }
   visibility = [ ":pdfium_public_headers" ]
 }
 
@@ -228,7 +232,11 @@ group("pdfium_public_headers") {
   ]
 }
 
-component("pdfium") {
+_pdfium_library_type = "component"
+if (pdf_is_shared_lib) {
+  _pdfium_library_type = "shared_library"
+}
+target(_pdfium_library_type, "pdfium") {
   output_name = "pdfium"
   libs = []
   configs += [ ":pdfium_strict_config" ]
@@ -463,7 +471,7 @@ group("gn_check") {
 
 # GN evaluates each .gn file once per toolchain, so restricting to default
 # toolchain will ensure write_file() is called only once.
-if (current_toolchain == default_toolchain) {
+if (current_toolchain == default_toolchain && !pdf_is_shared_lib) {
   import("//build/gn_logs.gni")
 
   # Write debug logs to gn_logs.txt.
