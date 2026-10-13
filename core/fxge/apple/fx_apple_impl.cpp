@@ -14,7 +14,7 @@
 #include "core/fxcrt/span.h"
 #include "core/fxge/agg/cfx_agg_cliprgn.h"
 #include "core/fxge/agg/cfx_agg_devicedriver.h"
-#include "core/fxge/apple/fx_apple_platform.h"
+#include "core/fxge/apple/capple_platform.h"
 #include "core/fxge/cfx_font.h"
 #include "core/fxge/cfx_gemodule.h"
 #include "core/fxge/cfx_glyphbitmap.h"
@@ -22,6 +22,7 @@
 #include "core/fxge/cfx_renderdevice.h"
 #include "core/fxge/cfx_substfont.h"
 #include "core/fxge/dib/cfx_dibitmap.h"
+#include "core/fxge/fx_font.h"
 #include "core/fxge/text_char_pos.h"
 
 namespace {
@@ -115,8 +116,8 @@ bool CFX_AggDeviceDriver::DrawDeviceText(
   }
 
   bool bBold = font->IsBold();
-  if (!bBold && font->GetSubstFont() && font->GetSubstFont()->weight_ >= 500 &&
-      font->GetSubstFont()->weight_ <= 600) {
+  if (!bBold && font->GetSubstFont() &&
+      font->GetSubstFont()->IsMediumWeight()) {
     return false;
   }
   for (const auto& cp : pCharPos) {
@@ -175,15 +176,6 @@ bool CFX_AggDeviceDriver::DrawDeviceText(
 }
 
 }  // namespace pdfium
-
-std::unique_ptr<CFX_GlyphBitmap> CFX_GlyphCache::RenderGlyph_Nativetext(
-    const CFX_Font* font,
-    uint32_t glyph_index,
-    const CFX_Matrix& matrix,
-    int dest_width,
-    int anti_alias) {
-  return nullptr;
-}
 
 void CFX_Font::ReleasePlatformResource() {
   if (platform_font_) {

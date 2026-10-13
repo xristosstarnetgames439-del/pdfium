@@ -6,7 +6,7 @@
 
 #include "core/fpdfapi/font/cpdf_tounicodemap.h"
 
-#include <set>
+#include <algorithm>
 #include <utility>
 #include <variant>
 
@@ -15,7 +15,6 @@
 #include "core/fpdfapi/parser/cpdf_simple_parser.h"
 #include "core/fpdfapi/parser/cpdf_stream.h"
 #include "core/fpdfapi/parser/fpdf_parser_utility.h"
-#include "core/fxcrt/containers/contains.h"
 #include "core/fxcrt/fx_extension.h"
 #include "core/fxcrt/fx_safe_types.h"
 
@@ -56,8 +55,8 @@ CPDF_ToUnicodeMap::CPDF_ToUnicodeMap(RetainPtr<const CPDF_Stream> pStream) {
 CPDF_ToUnicodeMap::~CPDF_ToUnicodeMap() = default;
 
 WideString CPDF_ToUnicodeMap::Lookup(uint32_t charcode) const {
-  auto it = multimap_.find(charcode);
-  if (it == multimap_.end()) {
+  auto it = map_.find(charcode);
+  if (it == map_.end()) {
     if (!base_map_) {
       return WideString();
     }
@@ -65,7 +64,7 @@ WideString CPDF_ToUnicodeMap::Lookup(uint32_t charcode) const {
         base_map_->UnicodeFromCID(static_cast<uint16_t>(charcode)));
   }
 
-  uint32_t value = *it->second.begin();
+  uint32_t value = it->second;
   wchar_t unicode = static_cast<wchar_t>(value & 0xffff);
   if (unicode != 0xffff) {
     return WideString(unicode);
@@ -76,18 +75,15 @@ WideString CPDF_ToUnicodeMap::Lookup(uint32_t charcode) const {
 }
 
 uint32_t CPDF_ToUnicodeMap::ReverseLookup(wchar_t unicode) const {
-  for (const auto& pair : multimap_) {
-    if (pdfium::Contains(pair.second, static_cast<uint32_t>(unicode))) {
-      return pair.first;
-    }
-  }
-  return 0;
+  auto it = reverse_map_.find(unicode);
+  return it != reverse_map_.end() ? it->second : 0;
 }
 
 size_t CPDF_ToUnicodeMap::GetUnicodeCountByCharcodeForTesting(
     uint32_t charcode) const {
-  auto it = multimap_.find(charcode);
-  return it != multimap_.end() ? it->second.size() : 0u;
+  return std::ranges::count_if(reverse_map_, [charcode](const auto& entry) {
+    return entry.second == charcode;
+  });
 }
 
 // static
@@ -99,7 +95,7 @@ std::optional<uint32_t> CPDF_ToUnicodeMap::StringToCode(ByteStringView str) {
 
   FX_SAFE_UINT32 code = 0;
   for (char c : str.Substr(1, len - 2)) {
-    // Ignore whitespace https://crbug.com/pdfium/2065
+    // Ignore whitespace https://crbug.com/42271078
     if (PDFCharIsWhitespace(c)) {
       continue;
     }
@@ -126,7 +122,7 @@ WideString CPDF_ToUnicodeMap::StringToWideString(ByteStringView str) {
   int byte_pos = 0;
   wchar_t ch = 0;
   for (char c : str.Substr(1, len - 2)) {
-    // Ignore whitespace https://crbug.com/pdfium/1022
+    // Ignore whitespace https://crbug.com/42270019
     if (PDFCharIsWhitespace(c)) {
       continue;
     }
@@ -146,7 +142,7 @@ WideString CPDF_ToUnicodeMap::StringToWideString(ByteStringView str) {
 }
 
 void CPDF_ToUnicodeMap::Load(RetainPtr<const CPDF_Stream> pStream) {
-  CIDSet cid_set = CIDSET_UNKNOWN;
+  CIDSet cid_set = CIDSet::kUnknown;
   auto pAcc = pdfium::MakeRetain<CPDF_StreamAcc>(std::move(pStream));
   pAcc->LoadAllDataFiltered();
   CPDF_SimpleParser parser(pAcc->GetSpan());
@@ -162,18 +158,18 @@ void CPDF_ToUnicodeMap::Load(RetainPtr<const CPDF_Stream> pStream) {
     } else if (word == "beginbfrange") {
       word = HandleBeginBFRange(parser, previous_word);
     } else if (word == "/Adobe-Korea1-UCS2") {
-      cid_set = CIDSET_KOREA1;
+      cid_set = CIDSet::kKorea1;
     } else if (word == "/Adobe-Japan1-UCS2") {
-      cid_set = CIDSET_JAPAN1;
+      cid_set = CIDSet::kJapan1;
     } else if (word == "/Adobe-CNS1-UCS2") {
-      cid_set = CIDSET_CNS1;
+      cid_set = CIDSet::kCNS1;
     } else if (word == "/Adobe-GB1-UCS2") {
-      cid_set = CIDSET_GB1;
+      cid_set = CIDSet::kGB1;
     }
 
     previous_word = word;
   }
-  if (cid_set != CIDSET_UNKNOWN) {
+  if (cid_set != CIDSet::kUnknown) {
     base_map_ = CPDF_FontGlobals::GetInstance()->GetCID2UnicodeMap(cid_set);
   }
 }
@@ -305,16 +301,11 @@ ByteStringView CPDF_ToUnicodeMap::HandleBeginBFRange(
 
     WideString destcode = StringToWideString(start);
     if (destcode.GetLength() == 1) {
-      std::optional<uint32_t> value_or_error = StringToCode(start);
-      if (!value_or_error.has_value()) {
-        is_valid = false;
-        continue;
-      }
-
-      ranges.push_back(
-          MultimapSingleDestRange{.low_code = lowcode,
-                                  .high_code = highcode,
-                                  .start_value = value_or_error.value()});
+      uint32_t start_value = pdfium::checked_cast<uint32_t>(destcode.Front());
+      CHECK_LE(start_value, 0xffff);
+      ranges.push_back(MultimapSingleDestRange{.low_code = lowcode,
+                                               .high_code = highcode,
+                                               .start_value = start_value});
     } else {
       MultimapMultiDestRange range;
       range.low_code = lowcode;
@@ -345,14 +336,14 @@ ByteStringView CPDF_ToUnicodeMap::HandleBeginBFRange(
         const auto& range = std::get<MultimapSingleDestRange>(entry);
         uint32_t value = range.start_value;
         for (uint32_t code = range.low_code; code <= range.high_code; ++code) {
-          InsertIntoMultimap(code, value++);
+          InsertIntoMaps(code, value++);
         }
       } else {
         CHECK(std::holds_alternative<MultimapMultiDestRange>(entry));
         const auto& range = std::get<MultimapMultiDestRange>(entry);
         uint32_t code = range.low_code;
         for (const auto& retcode : range.retcodes) {
-          InsertIntoMultimap(code, GetMultiCharIndexIndicator());
+          InsertIntoMaps(code, GetMultiCharIndexIndicator());
           multi_char_vec_.push_back(retcode);
           ++code;
         }
@@ -373,21 +364,41 @@ void CPDF_ToUnicodeMap::SetCode(uint32_t srccode, WideString destcode) {
   if (len == 0) {
     return;
   }
-
   if (len == 1) {
-    InsertIntoMultimap(srccode, destcode[0]);
+    InsertIntoMaps(srccode, destcode.Front());
   } else {
-    InsertIntoMultimap(srccode, GetMultiCharIndexIndicator());
+    InsertIntoMaps(srccode, GetMultiCharIndexIndicator());
     multi_char_vec_.push_back(destcode);
   }
 }
 
-void CPDF_ToUnicodeMap::InsertIntoMultimap(uint32_t code, uint32_t destcode) {
-  auto it = multimap_.find(code);
-  if (it == multimap_.end()) {
-    multimap_.emplace(code, std::set<uint32_t>{destcode});
-    return;
-  }
+void CPDF_ToUnicodeMap::InsertIntoMaps(uint32_t code, uint32_t destcode) {
+  // Adobe TN #5014, "Adobe CMap and CIDFont Files Specification": "Code
+  // mappings (unlike codespace ranges) may overlap, but succeeding maps
+  // superceded preceding maps." A later bfchar or bfrange entry therefore
+  // replaces an earlier mapping for the same code, which subset fonts rely on
+  // when a catch-all bfrange is followed by overrides for individual codes.
+  map_[code] = destcode;
+  reverse_map_[destcode] = code;
 
-  it->second.emplace(destcode);
+  // TODO(crbug.com/554790604): Two rough edges remain here.
+  //
+  // A superseded mapping leaves an orphaned entry behind in `reverse_map_`:
+  // after InsertIntoMaps(1, 2) and then InsertIntoMaps(1, 3), `map_` holds
+  // {1: 3} but `reverse_map_` holds {2: 1, 3: 1}, so ReverseLookup(2) still
+  // answers 1 for a mapping that no longer exists. Rebuilding `reverse_map_`
+  // from the finished `map_` removes those, but it changes which charcode
+  // font subsetting picks, so it needs its own change.
+  //
+  // Also, last-wins is only meaningful for a CMap that a producer authored.
+  // LoadCompositeFont() collects a font's cmap into a multimap keyed by glyph,
+  // so a glyph that several unicodes reach contributes several entries, and
+  // LoadUnicode() then emits overlapping bfranges for it. Which of those wins
+  // comes down to the order they were emitted in rather than to the font, and
+  // no ordering is right for all of them. Among the pairs
+  // FPDFSaveWithFontSubsetEmbedderTest covers, last-wins picks U+4E00 over
+  // U+2F00, which is the better answer, but also U+F906 over U+53E5 and
+  // U+00A0 over U+0020, which are worse; lowest-wins gets those same three
+  // the other way round. Making that CMap map each charcode once is the real
+  // fix.
 }

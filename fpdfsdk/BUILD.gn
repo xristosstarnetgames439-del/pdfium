@@ -65,24 +65,25 @@ source_set("fpdfsdk") {
     "../:pdfium_strict_config",
     "../:pdfium_noshorten_config",
   ]
-  deps = [
+  public_deps = [
     "../:pdfium_public_headers",
+    "../core/fpdfapi/page",
+    "../core/fpdfapi/parser",
+    "../core/fpdfdoc",
+    "../core/fxcrt",
+    "../core/fxge",
+    "formfiller",
+    "pwl",
+  ]
+  deps = [
     "../constants",
     "../core/fdrm",
     "../core/fpdfapi/edit",
-    "../core/fpdfapi/edit:contentstream_write_utils",
     "../core/fpdfapi/font",
-    "../core/fpdfapi/page",
-    "../core/fpdfapi/parser",
     "../core/fpdfapi/render",
-    "../core/fpdfdoc",
     "../core/fpdftext",
     "../core/fxcodec",
-    "../core/fxcrt",
-    "../core/fxge",
     "../fxjs",
-    "formfiller",
-    "pwl",
   ]
   allow_circular_includes_from = [
     "../fxjs",
@@ -99,6 +100,29 @@ source_set("fpdfsdk") {
     ]
     allow_circular_includes_from += [ "fpdfxfa" ]
   }
+}
+
+source_set("test_support") {
+  testonly = true
+  sources = [
+    "display_list_renderer.cpp",
+    "display_list_renderer.h",
+  ]
+  configs += [
+    "../:pdfium_strict_config",
+    "../:pdfium_noshorten_config",
+  ]
+  deps = [
+    ":fpdfsdk",
+    "../:pdfium_public_headers",
+    "../core/fpdfapi/page",
+    "../core/fpdfapi/parser",
+    "../core/fpdfapi/render",
+    "../core/fxcrt",
+    "../core/fxge",
+    "../core/fxge:test_support",
+  ]
+  visibility = [ "../*" ]
 }
 
 pdfium_unittest_source_set("unittests") {
@@ -118,6 +142,7 @@ pdfium_unittest_source_set("unittests") {
     "../core/fpdfapi/parser:unit_test_support",
     "../core/fpdfapi/render",
     "../core/fpdfdoc",
+    "../testing:test_support",
   ]
   pdfium_root_dir = "../"
 }
@@ -160,6 +185,8 @@ pdfium_embeddertest_source_set("embeddertests") {
     "../core/fpdfapi/parser",
     "../core/fxcrt:test_support",
     "../core/fxge",
+    "../testing:path_service",
+    "../testing:test_support",
   ]
   pdfium_root_dir = "../"
 

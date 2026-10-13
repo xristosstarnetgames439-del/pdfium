@@ -97,11 +97,11 @@ pdf_enable_fontations = false
 
 pdf_enable_xfa = true  # Set false to remove XFA support (implies JS support).
 pdf_enable_v8 = true  # Set false to remove Javascript support.
-pdf_is_standalone = true  # Set for a non-embedded build.
 is_component_build = false # Disable component build (Though it should work)
 ```
 
-For test applications like `pdfium_test` to build, one must set
+In order to minimize the build time for embedder applications, test executables
+like `pdfium_test` are not built by default. To build these, add the argument
 `pdf_is_standalone = true`.
 
 By default, the entire project builds with C++20.
@@ -232,8 +232,11 @@ Note, the Reviews and Bugs lists are typically read-only.
 
 ## Bugs
 
-PDFium uses this [bug tracker](https://crbug.com/pdfium/new), but for security
-bugs, please use
+PDFium uses this [bug tracker](https://crbug.com/pdfium/new).
+
+Report security bugs via [Google Bughunters (Chrome VRP)](https://bughunters.google.com/report/vrp).
+
+Project members and embedders can directly report security bugs using
 [Chromium's security bug template](https://crbug.com/new?component=1586257&noWizard=True&template=1922342).
 
 ## Contributing code

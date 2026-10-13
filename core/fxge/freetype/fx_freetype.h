@@ -7,12 +7,17 @@
 #ifndef CORE_FXGE_FREETYPE_FX_FREETYPE_H_
 #define CORE_FXGE_FREETYPE_FX_FREETYPE_H_
 
+#if !defined(PDF_ENABLE_FREETYPE)
+#error "PDF_ENABLE_FREETYPE must be defined."
+#endif  // defined(PDF_ENABLE_FREETYPE)
+
 #include <ft2build.h>
 
 #include <memory>
 
 #include "core/fxcrt/span.h"
 
+#include FT_FONT_FORMATS_H
 #include FT_FREETYPE_H
 #include FT_GLYPH_H
 #include FT_LCD_FILTER_H
@@ -21,11 +26,9 @@
 #include FT_TRUETYPE_TABLES_H
 
 using FXFT_LibraryRec = struct FT_LibraryRec_;
-using FXFT_FaceRec = struct FT_FaceRec_;
-using FXFT_StreamRec = struct FT_StreamRec_;
 
 struct FXFTFaceRecDeleter {
-  inline void operator()(FXFT_FaceRec* pRec) { FT_Done_Face(pRec); }
+  inline void operator()(FT_FaceRec* pRec) { FT_Done_Face(pRec); }
 };
 
 struct FXFTLibraryRecDeleter {
@@ -36,13 +39,13 @@ struct FXFTMMVarDeleter {
   void operator()(FT_MM_Var* variation_desc);
 };
 
-using ScopedFXFTFaceRec = std::unique_ptr<FXFT_FaceRec, FXFTFaceRecDeleter>;
+using ScopedFXFTFaceRec = std::unique_ptr<FT_FaceRec, FXFTFaceRecDeleter>;
 using ScopedFXFTLibraryRec =
     std::unique_ptr<FXFT_LibraryRec, FXFTLibraryRecDeleter>;
 
 class ScopedFXFTMMVar {
  public:
-  explicit ScopedFXFTMMVar(FXFT_FaceRec* face);
+  explicit ScopedFXFTMMVar(FT_FaceRec* face);
   ~ScopedFXFTMMVar();
 
   explicit operator bool() const { return !!variation_desc_; }
@@ -56,6 +59,10 @@ class ScopedFXFTMMVar {
   // Points into `variation_desc_`.
   const pdfium::span<const FT_Var_Axis> axis_;
 };
+
+ScopedFXFTLibraryRec InitializeFreeType();
+bool FreeTypeSetLcdFilterMode(FXFT_LibraryRec* ft_library);
+bool FreeTypeVersionSupportsHinting(FXFT_LibraryRec* ft_library);
 
 int FXFT_unicode_from_adobe_name(const char* glyph_name);
 void FXFT_adobe_name_from_unicode(pdfium::span<char> name_buf, wchar_t unicode);

@@ -14,11 +14,11 @@
 #include <vector>
 
 #include "core/fpdfapi/parser/cpdf_stream.h"
+#include "core/fxcrt/bytestring_pool.h"
 #include "core/fxcrt/data_vector.h"
 #include "core/fxcrt/fx_types.h"
 #include "core/fxcrt/retain_ptr.h"
 #include "core/fxcrt/span.h"
-#include "core/fxcrt/string_pool_template.h"
 #include "core/fxcrt/unowned_ptr.h"
 #include "core/fxcrt/weak_ptr.h"
 
@@ -37,6 +37,8 @@ class CPDF_SyntaxParser {
     ByteString word;
     bool is_number;
   };
+
+  static constexpr uint32_t kParserMaxRecursionDepth = 64;
 
   static std::unique_ptr<CPDF_SyntaxParser> CreateForTesting(
       RetainPtr<IFX_SeekableReadStream> pFileAccess,
@@ -94,8 +96,7 @@ class CPDF_SyntaxParser {
   friend class CPDF_DataAvail;
   friend class cpdf_syntax_parser_ReadHexString_Test;
 
-  static constexpr int kParserMaxRecursionDepth = 64;
-  static int s_CurrentRecursionDepth;
+  static uint32_t s_CurrentRecursionDepth;
 
   bool ReadBlockAt(FX_FILESIZE read_pos);
   bool GetCharAtBackward(FX_FILESIZE pos, uint8_t* ch);

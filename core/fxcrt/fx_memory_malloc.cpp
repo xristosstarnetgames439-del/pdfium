@@ -69,27 +69,3 @@ void StringDealloc(void* ptr) {
 
 }  // namespace internal
 }  // namespace pdfium
-
-void FX_InitializeMemoryAllocators() {}
-
-void FX_DestroyMemoryAllocators() {}
-
-void* FX_ArrayBufferAllocate(size_t length) {
-  void* result = calloc(length, 1);
-  if (!result) {
-    FX_OutOfMemoryTerminate(length);
-  }
-  return result;
-}
-
-void* FX_ArrayBufferAllocateUninitialized(size_t length) {
-  void* result = malloc(length);
-  if (!result) {
-    FX_OutOfMemoryTerminate(length);
-  }
-  return result;
-}
-
-void FX_ArrayBufferFree(void* data) {
-  free(data);
-}

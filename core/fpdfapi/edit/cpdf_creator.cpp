@@ -10,9 +10,11 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <set>
 #include <utility>
 
+#include "core/fpdfapi/edit/cpdf_fontsubsetter.h"
 #include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_crypto_handler.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
@@ -26,11 +28,13 @@
 #include "core/fpdfapi/parser/fpdf_parser_utility.h"
 #include "core/fpdfapi/parser/object_tree_traversal_util.h"
 #include "core/fxcrt/check.h"
+#include "core/fxcrt/check_op.h"
 #include "core/fxcrt/containers/contains.h"
 #include "core/fxcrt/fixed_size_data_vector.h"
 #include "core/fxcrt/fx_extension.h"
 #include "core/fxcrt/fx_random.h"
 #include "core/fxcrt/fx_safe_types.h"
+#include "core/fxcrt/mask.h"
 #include "core/fxcrt/raw_span.h"
 #include "core/fxcrt/span_util.h"
 #include "core/fxcrt/stl_util.h"
@@ -39,10 +43,19 @@ namespace {
 
 const size_t kArchiveBufferSize = 32768;
 
-class CFX_FileBufferArchive final : public IFX_ArchiveStream {
+constexpr Mask<CPDF_Creator::CreateFlags> kAllValidFlags{
+    CPDF_Creator::CreateFlags::kIncremental,
+    CPDF_Creator::CreateFlags::kNoOriginal,
+    CPDF_Creator::CreateFlags::kRemoveSecurity,
+    CPDF_Creator::CreateFlags::kSubsetNewFonts};
+constexpr Mask<CPDF_Creator::CreateFlags> kConflictingFlags{
+    CPDF_Creator::CreateFlags::kIncremental,
+    CPDF_Creator::CreateFlags::kNoOriginal};
+
+class FileBufferArchive final : public IFX_ArchiveStream {
  public:
-  explicit CFX_FileBufferArchive(RetainPtr<IFX_RetainableWriteStream> file);
-  ~CFX_FileBufferArchive() override;
+  explicit FileBufferArchive(RetainPtr<IFX_RetainableWriteStream> file);
+  ~FileBufferArchive() override;
 
   bool WriteBlock(pdfium::span<const uint8_t> buffer) override;
   FX_FILESIZE CurrentOffset() const override { return offset_; }
@@ -56,25 +69,24 @@ class CFX_FileBufferArchive final : public IFX_ArchiveStream {
   RetainPtr<IFX_RetainableWriteStream> const backing_file_;
 };
 
-CFX_FileBufferArchive::CFX_FileBufferArchive(
-    RetainPtr<IFX_RetainableWriteStream> file)
+FileBufferArchive::FileBufferArchive(RetainPtr<IFX_RetainableWriteStream> file)
     : buffer_(FixedSizeDataVector<uint8_t>::Uninit(kArchiveBufferSize)),
       available_(buffer_.span()),
       backing_file_(std::move(file)) {
   DCHECK(backing_file_);
 }
 
-CFX_FileBufferArchive::~CFX_FileBufferArchive() {
+FileBufferArchive::~FileBufferArchive() {
   Flush();
 }
 
-bool CFX_FileBufferArchive::Flush() {
+bool FileBufferArchive::Flush() {
   size_t used = buffer_.size() - available_.size();
   available_ = buffer_.span();
   return used == 0 || backing_file_->WriteBlock(available_.first(used));
 }
 
-bool CFX_FileBufferArchive::WriteBlock(pdfium::span<const uint8_t> buffer) {
+bool FileBufferArchive::WriteBlock(pdfium::span<const uint8_t> buffer) {
   if (buffer.empty()) {
     return true;
   }
@@ -99,17 +111,6 @@ bool CFX_FileBufferArchive::WriteBlock(pdfium::span<const uint8_t> buffer) {
   return true;
 }
 
-std::array<uint32_t, 4> GenerateFileID(uint32_t dwSeed1, uint32_t dwSeed2) {
-  void* context1 = FX_Random_MT_Start(dwSeed1);
-  void* context2 = FX_Random_MT_Start(dwSeed2);
-  std::array<uint32_t, 4> buffer = {
-      FX_Random_MT_Generate(context1), FX_Random_MT_Generate(context1),
-      FX_Random_MT_Generate(context2), FX_Random_MT_Generate(context2)};
-  FX_Random_MT_Close(context1);
-  FX_Random_MT_Close(context2);
-  return buffer;
-}
-
 bool OutputIndex(IFX_ArchiveStream* archive, FX_FILESIZE offset) {
   return archive->WriteByte(static_cast<uint8_t>(offset >> 24)) &&
          archive->WriteByte(static_cast<uint8_t>(offset >> 16)) &&
@@ -127,7 +128,7 @@ CPDF_Creator::CPDF_Creator(CPDF_Document* doc,
       encrypt_dict_(parser_ ? parser_->GetEncryptDict() : nullptr),
       security_handler_(parser_ ? parser_->GetSecurityHandler() : nullptr),
       last_obj_num_(document_->GetLastObjNum()),
-      archive_(std::make_unique<CFX_FileBufferArchive>(std::move(archive))) {}
+      archive_(std::make_unique<FileBufferArchive>(std::move(archive))) {}
 
 CPDF_Creator::~CPDF_Creator() = default;
 
@@ -200,15 +201,24 @@ bool CPDF_Creator::WriteOldObjs() {
 }
 
 bool CPDF_Creator::WriteNewObjs() {
+  std::map<uint32_t, RetainPtr<const CPDF_Object>> font_obj_overrides;
+  if (subset_new_fonts_) {
+    CPDF_FontSubsetter subsetter(document_);
+    font_obj_overrides = subsetter.GenerateObjectOverrides(new_obj_num_array_);
+  }
   for (size_t i = cur_obj_num_; i < new_obj_num_array_.size(); ++i) {
     uint32_t objnum = new_obj_num_array_[i];
-    RetainPtr<const CPDF_Object> pObj = document_->GetIndirectObject(objnum);
-    if (!pObj) {
+    RetainPtr<const CPDF_Object> obj = document_->GetIndirectObject(objnum);
+    if (!obj) {
       continue;
     }
 
     object_offsets_[objnum] = archive_->CurrentOffset();
-    if (!WriteIndirectObj(pObj->GetObjNum(), pObj.Get())) {
+
+    auto it = font_obj_overrides.find(objnum);
+    const CPDF_Object* obj_to_write =
+        it != font_obj_overrides.end() ? it->second.Get() : obj.Get();
+    if (!WriteIndirectObj(objnum, obj_to_write)) {
       return false;
     }
   }
@@ -444,7 +454,7 @@ CPDF_Creator::Stage CPDF_Creator::WriteDoc_Stage3() {
 }
 
 CPDF_Creator::Stage CPDF_Creator::WriteDoc_Stage4() {
-  DCHECK(stage_ >= Stage::kWriteTrailerAndFinish90);
+  DCHECK_GE(stage_, Stage::kWriteTrailerAndFinish90);
 
   bool bXRefStream = is_incremental_ && parser_->IsXRefStream();
   if (!bXRefStream) {
@@ -592,9 +602,27 @@ CPDF_Creator::Stage CPDF_Creator::WriteDoc_Stage4() {
   return stage_;
 }
 
-bool CPDF_Creator::Create(uint32_t flags) {
-  is_incremental_ = !!(flags & FPDFCREATE_INCREMENTAL);
-  is_original_ = !(flags & FPDFCREATE_NO_ORIGINAL);
+bool CPDF_Creator::Create(Mask<CreateFlags> flags, int32_t file_version) {
+  if (flags & ~kAllValidFlags) {
+    flags = CreateFlags::kNone;
+  }
+
+  if (flags == CreateFlags::kRemoveSecurityDeprecated ||
+      (flags & CreateFlags::kRemoveSecurity)) {
+    RemoveSecurity();
+  }
+
+  if (flags.TestAll(kConflictingFlags)) {
+    flags.Clear(kConflictingFlags);
+  }
+
+  is_incremental_ = !!(flags & CreateFlags::kIncremental);
+  is_original_ = !(flags & CreateFlags::kNoOriginal);
+  subset_new_fonts_ = !!(flags & CreateFlags::kSubsetNewFonts);
+
+  if (file_version >= 10 && file_version <= 17) {
+    file_version_ = file_version;
+  }
 
   stage_ = Stage::kInit0;
   last_obj_num_ = document_->GetLastObjNum();
@@ -608,7 +636,7 @@ bool CPDF_Creator::Create(uint32_t flags) {
 void CPDF_Creator::InitID() {
   DCHECK(!id_array_);
 
-  id_array_ = pdfium::MakeRetain<CPDF_Array>();
+  id_array_ = document_->New<CPDF_Array>();
   RetainPtr<const CPDF_Array> pOldIDArray =
       parser_ ? parser_->GetIDArray() : nullptr;
   RetainPtr<const CPDF_Object> pID1 =
@@ -616,8 +644,8 @@ void CPDF_Creator::InitID() {
   if (pID1) {
     id_array_->Append(pID1->Clone());
   } else {
-    std::array<uint32_t, 4> file_id =
-        GenerateFileID((uint32_t)(uintptr_t)this, last_obj_num_);
+    std::array<uint32_t, 4> file_id;
+    FX_Random::Fill(file_id);
     id_array_->AppendNew<CPDF_String>(pdfium::as_byte_span(file_id),
                                       CPDF_String::DataType::kIsHex);
   }
@@ -628,8 +656,8 @@ void CPDF_Creator::InitID() {
       id_array_->Append(pID2->Clone());
       return;
     }
-    std::array<uint32_t, 4> file_id =
-        GenerateFileID((uint32_t)(uintptr_t)this, last_obj_num_);
+    std::array<uint32_t, 4> file_id;
+    FX_Random::Fill(file_id);
     id_array_->AppendNew<CPDF_String>(pdfium::as_byte_span(file_id),
                                       CPDF_String::DataType::kIsHex);
     return;
@@ -679,14 +707,6 @@ bool CPDF_Creator::Continue() {
   }
 
   return stage_ > Stage::kInvalid;
-}
-
-bool CPDF_Creator::SetFileVersion(int32_t fileVersion) {
-  if (fileVersion < 10 || fileVersion > 17) {
-    return false;
-  }
-  file_version_ = fileVersion;
-  return true;
 }
 
 void CPDF_Creator::RemoveSecurity() {

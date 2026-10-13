@@ -22,13 +22,12 @@
 #include "core/fpdfapi/parser/cpdf_string.h"
 #include "core/fpdfapi/parser/fpdf_parser_utility.h"
 #include "core/fxcrt/autorestorer.h"
-#include "core/fxcrt/cfx_read_only_vector_stream.h"
+#include "core/fxcrt/cfx_read_only_container_stream.h"
 #include "core/fxcrt/check.h"
 #include "core/fxcrt/check_op.h"
 #include "core/fxcrt/data_vector.h"
 #include "core/fxcrt/fixed_size_data_vector.h"
 #include "core/fxcrt/fx_extension.h"
-#include "core/fxcrt/fx_memcpy_wrappers.h"
 #include "core/fxcrt/fx_safe_types.h"
 
 namespace {
@@ -77,7 +76,7 @@ class ReadableSubStream final : public IFX_SeekableReadStream {
 }  // namespace
 
 // static
-int CPDF_SyntaxParser::s_CurrentRecursionDepth = 0;
+uint32_t CPDF_SyntaxParser::s_CurrentRecursionDepth = 0;
 
 // static
 std::unique_ptr<CPDF_SyntaxParser> CPDF_SyntaxParser::CreateForTesting(
@@ -100,7 +99,7 @@ CPDF_SyntaxParser::CPDF_SyntaxParser(RetainPtr<CPDF_ReadValidator> validator,
     : file_access_(std::move(validator)),
       header_offset_(HeaderOffset),
       file_len_(file_access_->GetSize()) {
-  DCHECK(header_offset_ <= file_len_);
+  DCHECK_LE(header_offset_, file_len_);
 }
 
 CPDF_SyntaxParser::~CPDF_SyntaxParser() = default;
@@ -538,7 +537,7 @@ RetainPtr<CPDF_Object> CPDF_SyntaxParser::GetObjectBody(
 RetainPtr<CPDF_Object> CPDF_SyntaxParser::GetObjectBodyInternal(
     CPDF_IndirectObjectHolder* pObjList,
     ParseType parse_type) {
-  AutoRestorer<int> depth_restorer(&s_CurrentRecursionDepth);
+  AutoRestorer<uint32_t> depth_restorer(&s_CurrentRecursionDepth);
   if (++s_CurrentRecursionDepth > kParserMaxRecursionDepth) {
     return nullptr;
   }
@@ -580,10 +579,10 @@ RetainPtr<CPDF_Object> CPDF_SyntaxParser::GetObjectBodyInternal(
   }
 
   if (word == "(") {
-    return pdfium::MakeRetain<CPDF_String>(pool_, ReadString());
+    return pdfium::MakeRetain<CPDF_String>(ReadString());
   }
   if (word == "<") {
-    return pdfium::MakeRetain<CPDF_String>(pool_, ReadHexString(),
+    return pdfium::MakeRetain<CPDF_String>(ReadHexString(),
                                            CPDF_String::DataType::kIsHex);
   }
   if (word == "[") {
@@ -599,7 +598,7 @@ RetainPtr<CPDF_Object> CPDF_SyntaxParser::GetObjectBodyInternal(
                ? std::move(pArray)
                : nullptr;
   }
-  if (word[0] == '/') {
+  if (word.Front() == '/') {
     auto word_span = pdfium::span(word_buffer_).first(word_size_);
     return pdfium::MakeRetain<CPDF_Name>(
         pool_, PDF_NameDecode(ByteStringView(word_span).Substr(1)));
@@ -623,7 +622,7 @@ RetainPtr<CPDF_Object> CPDF_SyntaxParser::GetObjectBodyInternal(
         pos_ = SavedPos;
         break;
       }
-      if (inner_word[0] != '/') {
+      if (inner_word.Front() != '/') {
         continue;
       }
 
@@ -862,7 +861,8 @@ RetainPtr<CPDF_Stream> CPDF_SyntaxParser::ReadStream(
     bool did_read = substream->ReadBlockAtOffset(data.span(), 0);
     CHECK(did_read);
     auto data_as_stream =
-        pdfium::MakeRetain<CFX_ReadOnlyVectorStream>(std::move(data));
+        pdfium::MakeRetain<CFX_ReadOnlyFixedSizeDataVectorStream>(
+            std::move(data));
 
     stream = pdfium::MakeRetain<CPDF_Stream>(std::move(data_as_stream),
                                              std::move(dict));

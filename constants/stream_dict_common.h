@@ -8,10 +8,10 @@
 namespace pdfium {
 namespace stream {
 
-// PDF 1.7 spec, table 3.4.
+// ISO 32000-1:2008 spec, table 5.
 // Entries common to all stream dictionaries.
 //
-// TODO(https://crbug.com/pdfium/1049): Examine all usages of "Length",
+// TODO(https://crbug.com/42270045): Examine all usages of "Length",
 // "Filter", and "F".
 inline constexpr char kLength[] = "Length";
 inline constexpr char kFilter[] = "Filter";

@@ -11,7 +11,6 @@
 #include "testing/test_support.h"
 
 using FPDFParserDecodeEmbedderTest = EmbedderTest;
-using pdfium::kBlankPage612By792Checksum;
 
 TEST_F(FPDFParserDecodeEmbedderTest, Bug552046) {
   // Tests specifying multiple image filters for a stream. Should not cause a
@@ -20,17 +19,19 @@ TEST_F(FPDFParserDecodeEmbedderTest, Bug552046) {
   ScopedPage page = LoadScopedPage(0);
   ASSERT_TRUE(page);
   ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-  CompareBitmap(bitmap.get(), 612, 792, kBlankPage612By792Checksum);
+  CompareBitmap(bitmap.get(), pdfium::kBlankPage612By792Png);
 }
 
 TEST_F(FPDFParserDecodeEmbedderTest, Bug555784) {
   // Tests bad input to the run length decoder that caused a heap overflow.
-  // Should not cause a crash when rendered.
+  // Should not cause a crash when rendered. The image is 81915 pixels wide
+  // with 3277 DeviceN components at 16 bits each, which is a valid but
+  // enourmous pitch, so its one scanline does get decoded and drawn.
   ASSERT_TRUE(OpenDocument("bug_555784.pdf"));
   ScopedPage page = LoadScopedPage(0);
   ASSERT_TRUE(page);
   ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-  CompareBitmap(bitmap.get(), 612, 792, kBlankPage612By792Checksum);
+  CompareBitmap(bitmap.get(), "bug_555784");
 }
 
 TEST_F(FPDFParserDecodeEmbedderTest, Bug455199) {
@@ -40,6 +41,5 @@ TEST_F(FPDFParserDecodeEmbedderTest, Bug455199) {
   ScopedPage page = LoadScopedPage(0);
   ASSERT_TRUE(page);
   ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-
-  CompareBitmap(bitmap.get(), 200, 200, pdfium::HelloWorldChecksum());
+  CompareBitmapWithExpectationSuffix(bitmap.get(), pdfium::kHelloWorldPng);
 }

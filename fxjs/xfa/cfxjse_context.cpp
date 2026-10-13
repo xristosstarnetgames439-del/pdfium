@@ -17,7 +17,6 @@
 #include "fxjs/xfa/cfxjse_class.h"
 #include "fxjs/xfa/cfxjse_isolatetracker.h"
 #include "fxjs/xfa/cfxjse_runtimedata.h"
-#include "fxjs/xfa/cfxjse_value.h"
 #include "fxjs/xfa/cjx_object.h"
 #include "v8/include/v8-exception.h"
 #include "v8/include/v8-function.h"
@@ -27,10 +26,6 @@
 
 namespace {
 
-// TODO(pdfium): Define and use type-specific type tags for aligned pointers
-// stored in V8 objects. The type tags should not overlap with the ones used by
-// Blink, as defined in gin/public/gin_embedders.h.
-constexpr v8::EmbedderDataTypeTag kDefaultPDFiumTag = 0;
 
 const char szCompatibleModeScript[] =
     "(function(global, list) {\n"
@@ -131,19 +126,18 @@ void FXJSE_UpdateObjectBinding(v8::Local<v8::Object> hObject,
   DCHECK(!hObject.IsEmpty());
   DCHECK_EQ(hObject->InternalFieldCount(), 2);
   hObject->SetAlignedPointerInInternalField(
-      0, const_cast<wchar_t*>(kFXJSEHostObjectTag),
-      kDefaultPDFiumTag);
+      0, const_cast<wchar_t*>(kFXJSEHostObjectTag), fxv8::kPDFiumSentinelTag);
   hObject->SetAlignedPointerInInternalField(1, pNewBinding,
-                                            kDefaultPDFiumTag);
+                                            fxv8::kFXJSEHostObjectDataTag);
 }
 
 void FXJSE_ClearObjectBinding(v8::Local<v8::Object> hObject) {
   DCHECK(!hObject.IsEmpty());
   DCHECK_EQ(hObject->InternalFieldCount(), 2);
   hObject->SetAlignedPointerInInternalField(0, nullptr,
-                                            kDefaultPDFiumTag);
+                                            fxv8::kPDFiumSentinelTag);
   hObject->SetAlignedPointerInInternalField(1, nullptr,
-                                            kDefaultPDFiumTag);
+                                            fxv8::kFXJSEHostObjectDataTag);
 }
 
 CFXJSE_HostObject* FXJSE_RetrieveObjectBinding(v8::Local<v8::Value> hValue) {
@@ -154,13 +148,13 @@ CFXJSE_HostObject* FXJSE_RetrieveObjectBinding(v8::Local<v8::Value> hValue) {
   v8::Local<v8::Object> hObject = hValue.As<v8::Object>();
   if (hObject->InternalFieldCount() != 2 ||
       hObject->GetAlignedPointerFromInternalField(
-          0, kDefaultPDFiumTag) != kFXJSEHostObjectTag) {
+          0, fxv8::kPDFiumSentinelTag) != kFXJSEHostObjectTag) {
     return nullptr;
   }
 
   return static_cast<CFXJSE_HostObject*>(
       hObject->GetAlignedPointerFromInternalField(
-          1, kDefaultPDFiumTag));
+          1, fxv8::kFXJSEHostObjectDataTag));
 }
 
 // static
@@ -248,12 +242,12 @@ CFXJSE_Context::ExecutionResult CFXJSE_Context::ExecuteScript(
       v8::Local<v8::Value> hValue;
       if (hScript->Run(hContext).ToLocal(&hValue)) {
         CHECK(!trycatch.HasCaught());
-        return ExecutionResult(
-            true, std::make_unique<CFXJSE_Value>(GetIsolate(), hValue));
+        return ExecutionResult(true,
+                               v8::Global<v8::Value>(GetIsolate(), hValue));
       }
     }
     return ExecutionResult(
-        false, std::make_unique<CFXJSE_Value>(
+        false, v8::Global<v8::Value>(
                    GetIsolate(), CreateReturnValue(GetIsolate(), &trycatch)));
   }
 
@@ -270,8 +264,7 @@ CFXJSE_Context::ExecutionResult CFXJSE_Context::ExecuteScript(
     v8::Local<v8::Value> hValue;
     if (hWrapperFn->Call(hContext, hNewThis, 1, rgArgs).ToLocal(&hValue)) {
       DCHECK(!trycatch.HasCaught());
-      return ExecutionResult(
-          true, std::make_unique<CFXJSE_Value>(GetIsolate(), hValue));
+      return ExecutionResult(true, v8::Global<v8::Value>(GetIsolate(), hValue));
     }
   }
 
@@ -290,15 +283,14 @@ CFXJSE_Context::ExecutionResult CFXJSE_Context::ExecuteScript(
 #endif  // NDEBUG
 
   return ExecutionResult(
-      false, std::make_unique<CFXJSE_Value>(
-                 GetIsolate(), CreateReturnValue(GetIsolate(), &trycatch)));
+      false, v8::Global<v8::Value>(GetIsolate(),
+                                   CreateReturnValue(GetIsolate(), &trycatch)));
 }
 
 CFXJSE_Context::ExecutionResult::ExecutionResult() = default;
 
-CFXJSE_Context::ExecutionResult::ExecutionResult(
-    bool sts,
-    std::unique_ptr<CFXJSE_Value> val)
+CFXJSE_Context::ExecutionResult::ExecutionResult(bool sts,
+                                                 v8::Global<v8::Value> val)
     : status(sts), value(std::move(val)) {}
 
 CFXJSE_Context::ExecutionResult::ExecutionResult(

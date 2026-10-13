@@ -27,8 +27,8 @@ class CPDF_StreamAcc;
 struct DIB_COMP_DATA {
   float decode_min_;
   float decode_step_;
-  int color_key_min_;
-  int color_key_max_;
+  uint32_t color_key_min_;
+  uint32_t color_key_max_;
 };
 
 namespace fxcodec {
@@ -38,6 +38,9 @@ class ScanlineDecoder;
 
 constexpr size_t kHugeImageSize = 60000000;
 
+// Represents a device-independent bitmap parsed directly from a PDF image
+// stream. Handles image decoding, color space conversion, and masking (e.g.
+// color key masking).
 class CPDF_DIB final : public CFX_DIBBase {
  public:
   enum class LoadState : uint8_t { kFail, kSuccess, kContinue };
@@ -95,7 +98,15 @@ class CPDF_DIB final : public CFX_DIBBase {
   void LoadPalette();
   LoadState CreateDecoder(uint8_t resolution_levels_to_skip);
   bool CreateDCTDecoder(pdfium::span<const uint8_t> src_span,
-                        const CPDF_Dictionary* pParams);
+                        const CPDF_Dictionary* pParams,
+                        uint8_t resolution_levels_to_skip);
+  // Whether `components_` matches the color space's own component count, which
+  // is the condition under which a scanline gets translated at all. The two
+  // can disagree because LoadColorInfo() overrides `components_` for an
+  // ICCBased color space named DeviceGray, DeviceRGB or DeviceCMYK. Returns
+  // false when there is no color space.
+  bool ComponentCountMatchesColorSpace() const;
+  bool ShouldDecodeJpegToBgr() const;
   void TranslateScanline24bpp(pdfium::span<uint8_t> dest_scan,
                               pdfium::span<const uint8_t> src_scan) const;
   bool TranslateScanline24bppDefaultDecode(
@@ -130,6 +141,7 @@ class CPDF_DIB final : public CFX_DIBBase {
   std::vector<DIB_COMP_DATA> comp_data_;
   mutable DataVector<uint8_t> line_buf_;
   mutable DataVector<uint8_t> mask_buf_;
+  mutable DataVector<uint8_t> src_remainder_buf_;
   RetainPtr<CFX_DIBitmap> cached_bitmap_;
   // Note: Must not create a cycle between CPDF_DIB instances.
   RetainPtr<CPDF_DIB> mask_;

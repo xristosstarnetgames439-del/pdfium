@@ -19,29 +19,16 @@ namespace {
 
 constexpr partition_alloc::PartitionOptions kOptions = {};
 
-struct Allocators {
-#ifndef V8_ENABLE_SANDBOX
-  partition_alloc::PartitionAllocator array_buffer_allocator{kOptions};
-#endif
-
-  partition_alloc::PartitionAllocator general_allocator{kOptions};
-  partition_alloc::PartitionAllocator string_allocator{kOptions};
-};
-
-Allocators* g_allocators = nullptr;
-
-#ifndef V8_ENABLE_SANDBOX
-partition_alloc::PartitionAllocator& GetArrayBufferPartitionAllocator() {
-  return g_allocators->array_buffer_allocator;
-}
-#endif
-
 partition_alloc::PartitionAllocator& GetGeneralPartitionAllocator() {
-  return g_allocators->general_allocator;
+  static auto* general_allocator =
+      new partition_alloc::PartitionAllocator{kOptions};
+  return *general_allocator;
 }
 
 partition_alloc::PartitionAllocator& GetStringPartitionAllocator() {
-  return g_allocators->string_allocator;
+  static auto* string_allocator =
+      new partition_alloc::PartitionAllocator{kOptions};
+  return *string_allocator;
 }
 
 }  // namespace
@@ -57,8 +44,8 @@ void* Alloc(size_t num_members, size_t member_size) {
 
   return GetGeneralPartitionAllocator()
       .root()
-      ->AllocInline<partition_alloc::AllocFlags::kReturnNull>(
-          total.ValueOrDie(), "GeneralPartition");
+      ->Alloc<partition_alloc::AllocFlags::kReturnNull>(total.ValueOrDie(),
+                                                        "GeneralPartition");
 }
 
 void* Calloc(size_t num_members, size_t member_size) {
@@ -70,9 +57,9 @@ void* Calloc(size_t num_members, size_t member_size) {
 
   return GetGeneralPartitionAllocator()
       .root()
-      ->AllocInline<partition_alloc::AllocFlags::kReturnNull |
-                    partition_alloc::AllocFlags::kZeroFill>(total.ValueOrDie(),
-                                                            "GeneralPartition");
+      ->Alloc<partition_alloc::AllocFlags::kReturnNull |
+              partition_alloc::AllocFlags::kZeroFill>(total.ValueOrDie(),
+                                                      "GeneralPartition");
 }
 
 void* Realloc(void* ptr, size_t num_members, size_t member_size) {
@@ -111,51 +98,12 @@ void* StringAlloc(size_t num_members, size_t member_size) {
 
   return GetStringPartitionAllocator()
       .root()
-      ->AllocInline<partition_alloc::AllocFlags::kReturnNull>(
-          total.ValueOrDie(), "StringPartition");
+      ->Alloc<partition_alloc::AllocFlags::kReturnNull>(total.ValueOrDie(),
+                                                        "StringPartition");
 }
 
 void StringDealloc(void* ptr) {
-  // TODO(palmer): Removing this check exposes crashes when PDFium callers
-  // attempt to free |nullptr|. Although libc's |free| allows freeing |NULL|, no
-  // other Partition Alloc callers need this tolerant behavior. Additionally,
-  // checking for |nullptr| adds a branch to |PartitionFree|, and it's nice to
-  // not have to have that.
-  //
-  // So this check is hiding (what I consider to be) bugs, and we should try to
-  // fix them. https://bugs.chromium.org/p/pdfium/issues/detail?id=690
-  if (ptr) {
-    GetStringPartitionAllocator().root()->Free(ptr);
-  }
+  GetStringPartitionAllocator().root()->Free(ptr);
 }
 
 }  // namespace pdfium::internal
-
-void FX_InitializeMemoryAllocators() {
-  if (!g_allocators) {
-    g_allocators = new Allocators();
-  }
-}
-
-void FX_DestroyMemoryAllocators() {
-  delete g_allocators;
-  g_allocators = nullptr;
-}
-
-#ifndef V8_ENABLE_SANDBOX
-void* FX_ArrayBufferAllocate(size_t length) {
-  return GetArrayBufferPartitionAllocator()
-      .root()
-      ->AllocInline<partition_alloc::AllocFlags::kZeroFill>(length,
-                                                            "FXArrayBuffer");
-}
-
-void* FX_ArrayBufferAllocateUninitialized(size_t length) {
-  return GetArrayBufferPartitionAllocator().root()->Alloc(length,
-                                                          "FXArrayBuffer");
-}
-
-void FX_ArrayBufferFree(void* data) {
-  GetArrayBufferPartitionAllocator().root()->Free(data);
-}
-#endif  // V8_ENABLE_SANDBOX

@@ -176,7 +176,7 @@ TEST(ParserDecodeTest, ValidateDecoderPipelineWithIndirectObjects) {
   {
     // Invalid 2 decoder pipeline due to wrong type indirect object.
     CPDF_IndirectObjectHolder objects_holder;
-    auto decoder = pdfium::MakeRetain<CPDF_String>(nullptr, "FlateDecode");
+    auto decoder = pdfium::MakeRetain<CPDF_String>("FlateDecode");
     uint32_t decoder_number =
         objects_holder.AddIndirectObject(std::move(decoder));
 
@@ -351,7 +351,7 @@ TEST(ParserDecodeTest, DecodeText) {
   EXPECT_EQ(L"🎨", PDF_DecodeText(ToSpan("\xFE\xFF\xD8\x3C\xDF\xA8")));
 }
 
-// https://crbug.com/pdfium/182
+// https://crbug.com/42270832
 TEST(ParserDecodeTest, DecodeTextWithUnicodeEscapes) {
   EXPECT_EQ(L"\x0020\x5370\x5237",
             PDF_DecodeText(ToSpan(

@@ -7,12 +7,12 @@
 #include <utility>
 #include <vector>
 
+#include "constants/catalog.h"
 #include "constants/form_fields.h"
 #include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
 #include "core/fpdfapi/parser/cpdf_document.h"
 #include "core/fxcrt/compiler_specific.h"
-#include "core/fxcrt/fx_memcpy_wrappers.h"
 #include "core/fxcrt/numerics/safe_conversions.h"
 #include "core/fxcrt/span.h"
 #include "core/fxcrt/span_util.h"
@@ -29,7 +29,8 @@ std::vector<RetainPtr<const CPDF_Dictionary>> CollectSignatures(
     return signatures;
   }
 
-  RetainPtr<const CPDF_Dictionary> acro_form = root->GetDictFor("AcroForm");
+  RetainPtr<const CPDF_Dictionary> acro_form =
+      root->GetDictFor(pdfium::catalog::kAcroForm);
   if (!acro_form) {
     return signatures;
   }

@@ -12,7 +12,7 @@
 #include "core/fpdfapi/parser/cpdf_reference.h"
 #include "core/fxcrt/bytestring.h"
 #include "core/fxcrt/fx_safe_types.h"
-#include "core/fxge/cfx_defaultrenderdevice.h"
+#include "core/fxge/cfx_renderdevice.h"
 #include "fpdfsdk/cpdfsdk_helpers.h"
 #include "public/cpp/fpdf_scopers.h"
 #include "public/fpdf_doc.h"
@@ -603,6 +603,94 @@ TEST_F(FPDFDocEmbedderTest, FindBookmarks) {
   EXPECT_FALSE(FPDFBookmark_Find(document(), bad_title.get()));
 }
 
+TEST_F(FPDFDocEmbedderTest, FindBookmarksWithColor) {
+  ASSERT_TRUE(OpenDocument("bookmarks_color.pdf"));
+
+  float red = 100;
+  float green = 100;
+  float blue = 100;
+
+  ScopedFPDFWideString title = GetFPDFWideString(L"No Color Array");
+  FPDF_BOOKMARK bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_FALSE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 100);
+  EXPECT_FLOAT_EQ(green, 100);
+  EXPECT_FLOAT_EQ(blue, 100);
+
+  title = GetFPDFWideString(L"Color Is Not An Array");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_FALSE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 100);
+  EXPECT_FLOAT_EQ(green, 100);
+  EXPECT_FLOAT_EQ(blue, 100);
+
+  title = GetFPDFWideString(L"Color Array Has The Wrong Number Of Elements");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_FALSE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 100);
+  EXPECT_FLOAT_EQ(green, 100);
+  EXPECT_FLOAT_EQ(blue, 100);
+
+  title = GetFPDFWideString(L"Color Array Has Entries Greater Than 1");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_FALSE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 100);
+  EXPECT_FLOAT_EQ(green, 100);
+  EXPECT_FLOAT_EQ(blue, 100);
+
+  title = GetFPDFWideString(L"Color Array Has Entries Less Than 0");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_FALSE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 100);
+  EXPECT_FLOAT_EQ(green, 100);
+  EXPECT_FLOAT_EQ(blue, 100);
+
+  title = GetFPDFWideString(L"Valid Color Array");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_TRUE(FPDFBookmark_GetColor(bookmark, &red, &green, &blue));
+  EXPECT_FLOAT_EQ(red, 0.1);
+  EXPECT_FLOAT_EQ(green, 0.2);
+  EXPECT_FLOAT_EQ(blue, 0.3);
+}
+
+TEST_F(FPDFDocEmbedderTest, BookmarkStyle) {
+  ASSERT_TRUE(OpenDocument("bookmarks_style.pdf"));
+
+  ScopedFPDFWideString title = GetFPDFWideString(L"No Style");
+  FPDF_BOOKMARK bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_EQ(0, FPDFBookmark_GetStyle(bookmark));
+
+  title = GetFPDFWideString(L"Style Is Not An Int");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  EXPECT_EQ(0, FPDFBookmark_GetStyle(bookmark));
+
+  title = GetFPDFWideString(L"Style Is 15");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  // Value is passed on to the caller as is.
+  EXPECT_EQ(15, FPDFBookmark_GetStyle(bookmark));
+
+  title = GetFPDFWideString(L"Style is Normal");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  // 0 = 00 in binary, no styling.
+  EXPECT_EQ(0, FPDFBookmark_GetStyle(bookmark));
+
+  title = GetFPDFWideString(L"Style is Bold and Italic");
+  bookmark = FPDFBookmark_Find(document(), title.get());
+  ASSERT_TRUE(bookmark);
+  // 3 = 11 in binary, bold and italic.
+  EXPECT_EQ(3, FPDFBookmark_GetStyle(bookmark));
+}
+
 // Check circular bookmarks will not cause infinite loop.
 TEST_F(FPDFDocEmbedderTest, FindBookmarksBug420) {
   // Open a file with circular bookmarks.
@@ -630,42 +718,12 @@ TEST_F(FPDFDocEmbedderTest, DeletePage) {
 }
 
 TEST_F(FPDFDocEmbedderTest, DeletePageAndRender) {
-  struct PageData {
-    int width;
-    int height;
-    const char* checksum;
-  };
-  const std::array<const PageData, 5> expected_page_data = {{
-      {200, 250,
-       []() {
-         return CFX_DefaultRenderDevice::UseSkiaRenderer()
-                    ? "4b6590a267eae90b8be1607e808fb57f"
-                    : "1e5d1cf19ffbb9cf9dbf099483cea327";
-       }()},
-      {250, 200,
-       []() {
-         return CFX_DefaultRenderDevice::UseSkiaRenderer()
-                    ? "e8edd3655f6629ff489bd8c3bb110c82"
-                    : "65c80685916aa36e767dd2270ba4d72b";
-       }()},
-      {200, 250,
-       []() {
-         return CFX_DefaultRenderDevice::UseSkiaRenderer()
-                    ? "a2bde6b68d7981e665ab25bc633746aa"
-                    : "a53b21c68edf43c1cddb5c06e361bb45";
-       }()},
-      {200, 250,
-       []() {
-         return CFX_DefaultRenderDevice::UseSkiaRenderer()
-                    ? "a8c5b3e626f665eddf593c6d4c32ae9e"
-                    : "dcd768be15efb9c6e5093cf74508752c";
-       }()},
-      {200, 250,
-       []() {
-         return CFX_DefaultRenderDevice::UseSkiaRenderer()
-                    ? "72eb157853ae2d19b70ea62e3f5ac202"
-                    : "7a3f8f79ebcb350854c0d69607729ec5";
-       }()},
+  const std::array<const char*, 5> page_paths = {{
+      "rectangles_multi_pages_1",
+      "rectangles_multi_pages_2",
+      "rectangles_multi_pages_3",
+      "rectangles_multi_pages_4",
+      "rectangles_multi_pages_5",
   }};
 
   // Render the original document. (page indices 0-4)
@@ -675,9 +733,7 @@ TEST_F(FPDFDocEmbedderTest, DeletePageAndRender) {
     ScopedPage page = LoadScopedPage(i);
     ASSERT_TRUE(page);
     ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-    const PageData& expected = expected_page_data[i];
-    CompareBitmap(bitmap.get(), expected.width, expected.height,
-                  expected.checksum);
+    CompareBitmapWithExpectationSuffix(bitmap.get(), page_paths[i]);
   }
 
   // Delete the first page and render again. (original page indices 1-4)
@@ -687,9 +743,7 @@ TEST_F(FPDFDocEmbedderTest, DeletePageAndRender) {
     ScopedPage page = LoadScopedPage(i);
     ASSERT_TRUE(page);
     ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-    const PageData& expected = expected_page_data[i + 1];
-    CompareBitmap(bitmap.get(), expected.width, expected.height,
-                  expected.checksum);
+    CompareBitmapWithExpectationSuffix(bitmap.get(), page_paths[i + 1]);
   }
 
   // Delete the last page and render again. (original page indices 1-3)
@@ -699,9 +753,7 @@ TEST_F(FPDFDocEmbedderTest, DeletePageAndRender) {
     ScopedPage page = LoadScopedPage(i);
     ASSERT_TRUE(page);
     ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
-    const PageData& expected = expected_page_data[i + 1];
-    CompareBitmap(bitmap.get(), expected.width, expected.height,
-                  expected.checksum);
+    CompareBitmapWithExpectationSuffix(bitmap.get(), page_paths[i + 1]);
   }
 
   // Delete the middle page and render again. (original page indices 1, 3)
@@ -712,9 +764,8 @@ TEST_F(FPDFDocEmbedderTest, DeletePageAndRender) {
     ASSERT_TRUE(page);
     ScopedFPDFBitmap bitmap = RenderLoadedPage(page.get());
     int adjusted_index = i == 0 ? 1 : 3;
-    const PageData& expected = expected_page_data[adjusted_index];
-    CompareBitmap(bitmap.get(), expected.width, expected.height,
-                  expected.checksum);
+    CompareBitmapWithExpectationSuffix(bitmap.get(),
+                                       page_paths[adjusted_index]);
   }
 }
 

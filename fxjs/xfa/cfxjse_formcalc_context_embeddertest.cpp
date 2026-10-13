@@ -11,7 +11,6 @@
 #include "fxjs/fxv8.h"
 #include "fxjs/xfa/cfxjse_engine.h"
 #include "fxjs/xfa/cfxjse_isolatetracker.h"
-#include "fxjs/xfa/cfxjse_value.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/scoped_set_tz.h"
 #include "testing/xfa_js_embedder_test.h"
@@ -415,7 +414,7 @@ TEST_F(CFXJSEFormCalcContextEmbedderTest, Time2Num) {
   ExecuteExpectInt32("Time2Num(\"00:01:00 GMT\", \"HH:MM:SS Z\")", 60001);
   ExecuteExpectInt32("Time2Num(\"01:00:00 GMT\", \"HH:MM:SS Z\")", 3600001);
   ExecuteExpectInt32("Time2Num(\"23:59:59 GMT\", \"HH:MM:SS Z\")", 86399001);
-  // https://crbug.com/pdfium/1257
+  // https://crbug.com/42270255
   ExecuteExpectInt32("Time2Num(\"\", \"\", 1)", 0);
   ExecuteExpectInt32("Time2Num(\"13:13:13 GMT\", \"HH:MM:SS Z\", \"fr_FR\")",
                      47593001);

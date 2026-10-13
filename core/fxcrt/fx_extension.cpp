@@ -12,13 +12,16 @@
 
 #include "core/fxcrt/check.h"
 #include "core/fxcrt/check_op.h"
-#include "core/fxcrt/compiler_specific.h"
 #include "core/fxcrt/fx_system.h"
 #include "core/fxcrt/utf16.h"
 #include "core/fxcrt/widestring.h"
 #include "third_party/fast_float/src/include/fast_float/fast_float.h"
 
 namespace {
+
+constexpr int kMinutesPerHour = 60;
+constexpr int kHoursPerDay = 24;
+constexpr int kMinutesPerDay = kMinutesPerHour * kHoursPerDay;
 
 time_t DefaultTimeFunction() {
   return time(nullptr);
@@ -28,8 +31,8 @@ struct tm* DefaultLocaltimeFunction(const time_t* tp) {
   return localtime(tp);
 }
 
-time_t (*g_time_func)() = DefaultTimeFunction;
-struct tm* (*g_localtime_func)(const time_t*) = DefaultLocaltimeFunction;
+TimeFunction g_time_func = DefaultTimeFunction;
+LocaltimeFunction g_localtime_func = DefaultLocaltimeFunction;
 
 }  // namespace
 
@@ -62,23 +65,6 @@ float FXSYS_wcstof(WideStringView pwsStr, size_t* pUsedLen) {
              : 0;
 }
 
-wchar_t* FXSYS_wcsncpy(wchar_t* dstStr, const wchar_t* srcStr, size_t count) {
-  DCHECK(dstStr);
-  DCHECK(srcStr);
-  DCHECK(count > 0);
-
-  // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE in header.
-  UNSAFE_BUFFERS({
-    for (size_t i = 0; i < count; ++i) {
-      dstStr[i] = srcStr[i];
-      if (dstStr[i] == L'\0') {
-        break;
-      }
-    }
-  });
-  return dstStr;
-}
-
 void FXSYS_IntToTwoHexChars(uint8_t n, pdfium::span<char, 2u> buf) {
   static constexpr std::array<const char, 16> kHex = {
       '0', '1', '2', '3', '4', '5', '6', '7',
@@ -109,12 +95,16 @@ pdfium::span<const char> FXSYS_ToUTF16BE(uint32_t unicode,
   return buf;
 }
 
-void FXSYS_SetTimeFunction(time_t (*func)()) {
+TimeFunction FXSYS_SetTimeFunction(TimeFunction func) {
+  TimeFunction old_func = g_time_func;
   g_time_func = func ? func : DefaultTimeFunction;
+  return old_func;
 }
 
-void FXSYS_SetLocaltimeFunction(struct tm* (*func)(const time_t*)) {
+LocaltimeFunction FXSYS_SetLocaltimeFunction(LocaltimeFunction func) {
+  LocaltimeFunction old_func = g_localtime_func;
   g_localtime_func = func ? func : DefaultLocaltimeFunction;
+  return old_func;
 }
 
 time_t FXSYS_time(time_t* tloc) {
@@ -127,4 +117,17 @@ time_t FXSYS_time(time_t* tloc) {
 
 struct tm* FXSYS_localtime(const time_t* tp) {
   return g_localtime_func(tp);
+}
+
+int FXSYS_TimeZoneOffsetInMinutes(const tm& local_time, const tm& utc_time) {
+  int day_offset = local_time.tm_mday - utc_time.tm_mday;
+  if (day_offset > 1) {
+    day_offset = -1;
+  } else if (day_offset < -1) {
+    day_offset = 1;
+  }
+
+  return day_offset * kMinutesPerDay +
+         (local_time.tm_hour - utc_time.tm_hour) * kMinutesPerHour +
+         (local_time.tm_min - utc_time.tm_min);
 }

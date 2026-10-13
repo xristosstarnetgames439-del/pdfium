@@ -44,18 +44,20 @@ class CStretchEngine {
                                      int src_width,
                                      int src_height);
 
+  template <typename T>
+  static bool IsValidDestinationDimension(T value) {
+    // Note: Negate `kMaxImageDimension` in this check, and not the dimension
+    // value, since negating the dimension may be undefined behavior.
+    static constexpr int kMaxImageDimension = 1024 * 1024;
+    return value >= -kMaxImageDimension && value <= kMaxImageDimension;
+  }
+
   struct PixelWeight {
     void SetStartEnd(int src_start, int src_end, size_t weight_count) {
+      CHECK_GE(src_start, 0);
       CHECK_LT(src_end - src_start, static_cast<int>(weight_count));
       src_start_ = src_start;
       src_end_ = src_end;
-    }
-
-    uint32_t GetWeightForPosition(int position) const {
-      CHECK_GE(position, src_start_);
-      CHECK_LE(position, src_end_);
-      // SAFETY: enforced by checks above.
-      return UNSAFE_BUFFERS(weights_[position - src_start_]);
     }
 
     void SetWeightForPosition(int position, uint32_t weight) {
@@ -63,6 +65,23 @@ class CStretchEngine {
       CHECK_LE(position, src_end_);
       // SAFETY: enforced by checks above.
       UNSAFE_BUFFERS(weights_[position - src_start_] = weight);
+    }
+
+    // The first source position this pixel taps. Non-negative, so callers
+    // can index a span with it directly.
+    size_t GetSrcStart() const { return static_cast<size_t>(src_start_); }
+
+    // One weight per source position in [src_start_, src_end_]; empty for an
+    // empty range.
+    pdfium::span<const uint32_t> GetWeights() const {
+      if (src_end_ < src_start_) {
+        return {};
+      }
+      // SAFETY: CalculateWeights() sizes each PixelWeight for exactly
+      // `src_end_ - src_start_ + 1` trailing weights, and SetStartEnd()
+      // CHECKs that the range fits the allocation.
+      return UNSAFE_BUFFERS(pdfium::span(
+          weights_, static_cast<size_t>(src_end_ - src_start_ + 1)));
     }
 
     // NOTE: relies on defined behaviour for unsigned overflow to
@@ -125,6 +144,7 @@ class CStretchEngine {
  private:
   enum class State : uint8_t { kInitial, kHorizontal, kVertical };
 
+  // ToManyBpp means To24OrTo32Bpp here.
   enum class TransformMethod : uint8_t {
     k1BppTo8Bpp,
     k1BppToManyBpp,
@@ -133,6 +153,11 @@ class CStretchEngine {
     kManyBpptoManyBpp,
     kManyBpptoManyBppWithAlpha
   };
+
+  // For 1bpp sources: expands `src_row` to one byte per pixel, 0 or 255, in
+  // `expanded_row_` and returns that.
+  pdfium::span<const uint8_t> Expand1BppRow(
+      pdfium::span<const uint8_t> src_row);
 
   const FXDIB_Format dest_format_;
   const int dest_bpp_;
@@ -148,6 +173,7 @@ class CStretchEngine {
   const FX_RECT dest_clip_;
   DataVector<uint8_t> dest_scanline_;
   FixedSizeDataVector<uint8_t> inter_buf_;
+  FixedSizeDataVector<uint8_t> expanded_row_;
   FX_RECT src_clip_;
   int inter_pitch_;
   int extra_mask_pitch_;

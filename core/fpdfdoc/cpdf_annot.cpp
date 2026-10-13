@@ -26,6 +26,7 @@
 #include "core/fpdfapi/render/cpdf_renderoptions.h"
 #include "core/fpdfdoc/cpdf_generateap.h"
 #include "core/fxcrt/check.h"
+#include "core/fxcrt/check_op.h"
 #include "core/fxge/cfx_fillrenderoptions.h"
 #include "core/fxge/cfx_graphstatedata.h"
 #include "core/fxge/cfx_path.h"
@@ -162,7 +163,9 @@ bool CPDF_Annot::ShouldGenerateAP() const {
     return false;
   }
 
-  return !IsHidden();
+  // Closed popups are recreated on every render. Generate their appearance
+  // only when opened; DrawAppearance() and DrawInContext() retry at that point.
+  return ShouldDrawAnnotation();
 }
 
 bool CPDF_Annot::ShouldDrawAnnotation() const {
@@ -252,7 +255,7 @@ std::optional<CFX_FloatRect> CPDF_Annot::GetPopupAnnotRect() const {
 CFX_FloatRect CPDF_Annot::RectFromQuadPointsArray(const CPDF_Array* pArray,
                                                   size_t nIndex) {
   DCHECK(pArray);
-  DCHECK(nIndex < pArray->size() / 8);
+  DCHECK_LT(nIndex, pArray->size() / 8);
 
   // QuadPoints are defined with 4 pairs of numbers
   // ([ pair0, pair1, pair2, pair3 ]), where
@@ -513,105 +516,3 @@ bool CPDF_Annot::DrawInContext(CPDF_Page* pPage,
   return true;
 }
 
-void CPDF_Annot::DrawBorder(CFX_RenderDevice* pDevice,
-                            const CFX_Matrix* pUser2Device) {
-  if (GetSubtype() == CPDF_Annot::Subtype::POPUP) {
-    return;
-  }
-
-  uint32_t annot_flags = GetFlags();
-  if (annot_flags & pdfium::annotation_flags::kHidden) {
-    return;
-  }
-
-#if BUILDFLAG(IS_WIN)
-  bool is_printing = pDevice->GetDeviceType() == DeviceType::kPrinter;
-  if (is_printing && (annot_flags & pdfium::annotation_flags::kPrint) == 0) {
-    return;
-  }
-#else
-  const bool is_printing = false;
-#endif
-
-  if (!is_printing && (annot_flags & pdfium::annotation_flags::kNoView)) {
-    return;
-  }
-
-  RetainPtr<const CPDF_Dictionary> pBS = annot_dict_->GetDictFor("BS");
-  char style_char;
-  float width;
-  RetainPtr<const CPDF_Array> pDashArray;
-  if (!pBS) {
-    RetainPtr<const CPDF_Array> pBorderArray =
-        annot_dict_->GetArrayFor(pdfium::annotation::kBorder);
-    style_char = 'S';
-    if (pBorderArray) {
-      width = pBorderArray->GetFloatAt(2);
-      if (pBorderArray->size() == 4) {
-        pDashArray = pBorderArray->GetArrayAt(3);
-        if (!pDashArray) {
-          return;
-        }
-        size_t nLen = pDashArray->size();
-        size_t i = 0;
-        for (; i < nLen; ++i) {
-          RetainPtr<const CPDF_Object> pObj = pDashArray->GetDirectObjectAt(i);
-          if (pObj && pObj->GetInteger()) {
-            break;
-          }
-        }
-        if (i == nLen) {
-          return;
-        }
-        style_char = 'D';
-      }
-    } else {
-      width = 1;
-    }
-  } else {
-    ByteString style = pBS->GetByteStringFor("S");
-    pDashArray = pBS->GetArrayFor("D");
-    style_char = style[0];
-    width = pBS->GetFloatFor("W");
-  }
-  if (width <= 0) {
-    return;
-  }
-  RetainPtr<const CPDF_Array> pColor =
-      annot_dict_->GetArrayFor(pdfium::annotation::kC);
-  uint32_t argb = 0xff000000;
-  if (pColor) {
-    int R = static_cast<int32_t>(pColor->GetFloatAt(0) * 255);
-    int G = static_cast<int32_t>(pColor->GetFloatAt(1) * 255);
-    int B = static_cast<int32_t>(pColor->GetFloatAt(2) * 255);
-    argb = ArgbEncode(0xff, R, G, B);
-  }
-  CFX_GraphStateData graph_state;
-  graph_state.set_line_width(width);
-  if (style_char == 'U') {
-    // TODO(https://crbug.com/237527): Handle the "Underline" border style
-    // instead of drawing the rectangle border.
-    return;
-  }
-
-  if (style_char == 'D') {
-    if (pDashArray) {
-      std::vector<float> dash_array =
-          ReadArrayElementsToVector(pDashArray.Get(), pDashArray->size());
-      if (dash_array.size() % 2) {
-        dash_array.push_back(dash_array.back());
-      }
-      graph_state.set_dash_array(std::move(dash_array));
-    } else {
-      graph_state.set_dash_array({3.0f, 3.0f});
-    }
-  }
-
-  CFX_FloatRect rect = GetRect();
-  rect.Deflate(width / 2, width / 2);
-
-  CFX_Path path;
-  path.AppendFloatRect(rect);
-  pDevice->DrawPath(path, pUser2Device, &graph_state, argb, argb,
-                    CFX_FillRenderOptions());
-}

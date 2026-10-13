@@ -17,6 +17,7 @@
 #include <tuple>
 #include <utility>
 
+#include "build/build_config.h"
 #include "core/fxcrt/check_op.h"
 #include "core/fxcrt/compiler_specific.h"
 #include "core/fxcrt/fx_memcpy_wrappers.h"
@@ -44,7 +45,7 @@ class FuzzerTestLoader {
     end += size;
     CHECK_LE(end.ValueOrDie(), pLoader->span_.size());
 
-    FXSYS_memcpy(pBuf, &pLoader->span_[pos], size);
+    UNSAFE_TODO(FXSYS_memcpy(pBuf, &pLoader->span_[pos], size));
     return 1;
   }
 
@@ -71,9 +72,9 @@ int ExampleAppResponse(IPDF_JSPLATFORM*,
   // UTF-16, always LE regardless of platform.
   uint8_t* ptr = static_cast<uint8_t*>(response);
   ptr[0] = 'N';
-  ptr[1] = 0;
-  ptr[2] = 'o';
-  ptr[3] = 0;
+  UNSAFE_TODO(ptr[1]) = 0;
+  UNSAFE_TODO(ptr[2]) = 'o';
+  UNSAFE_TODO(ptr[3]) = 0;
   return 4;
 }
 
@@ -139,7 +140,11 @@ int GetBytesPerPixelForBitmapFormat(int bitmap_format) {
 }
 
 bool CheckImageSize(int width, int height, int bitmap_format) {
+#if defined(ARCH_CPU_64_BITS)
   static constexpr uint32_t kMemLimitBytes = 1024 * 1024 * 1024;  // 1 GB.
+#else
+  static constexpr uint32_t kMemLimitBytes = 512 * 1024 * 1024;  // 512 MB.
+#endif
   FX_SAFE_UINT32 mem = width;
   mem *= height;
   mem *= GetBytesPerPixelForBitmapFormat(bitmap_format);

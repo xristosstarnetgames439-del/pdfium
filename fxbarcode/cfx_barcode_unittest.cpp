@@ -10,7 +10,6 @@
 
 #include "core/fxcrt/fx_coordinates.h"
 #include "core/fxcrt/fx_string.h"
-#include "core/fxge/cfx_defaultrenderdevice.h"
 #include "core/fxge/cfx_renderdevice.h"
 #include "core/fxge/dib/cfx_dibitmap.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -22,13 +21,13 @@ class BarcodeTest : public testing::Test {
   void SetUp() override {
     BC_Library_Init();
 
-    auto device = std::make_unique<CFX_DefaultRenderDevice>();
     auto bitmap = pdfium::MakeRetain<CFX_DIBitmap>();
     if (bitmap->Create(640, 480, FXDIB_Format::kBgrx)) {
       bitmap_ = bitmap;
     }
     ASSERT_TRUE(bitmap_);
-    ASSERT_TRUE(device->Attach(bitmap_));
+    auto device = CFX_RenderDevice::CreateForBitmap(bitmap_);
+    ASSERT_TRUE(device);
     device_ = std::move(device);
   }
 
@@ -42,7 +41,7 @@ class BarcodeTest : public testing::Test {
   CFX_Barcode* barcode() const { return barcode_.get(); }
 
   void Create(BC_TYPE type) {
-    barcode_ = CFX_Barcode::Create(type);
+    barcode_ = std::make_unique<CFX_Barcode>(type);
     barcode_->SetHeight(298);
     barcode_->SetWidth(418);
   }
@@ -65,7 +64,7 @@ class BarcodeTest : public testing::Test {
   RetainPtr<CFX_DIBitmap> bitmap_;
 };
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Code39 DISABLED_Code39
 #else
@@ -78,7 +77,7 @@ TEST_F(BarcodeTest, MAYBE_Code39) {
   EXPECT_EQ("cd4cd3f36da38ff58d9f621827018903", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_CodaBar DISABLED_CodaBar
 #else
@@ -96,7 +95,7 @@ TEST_F(BarcodeTest, CodaBarLetters) {
   EXPECT_FALSE(barcode()->Encode(L"clams"));
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Code128 DISABLED_Code128
 #else
@@ -109,7 +108,7 @@ TEST_F(BarcodeTest, MAYBE_Code128) {
   EXPECT_EQ("6351f0f6e997050e4658bbb4777aef74", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Code128B DISABLED_Code128B
 #else
@@ -122,7 +121,7 @@ TEST_F(BarcodeTest, MAYBE_Code128B) {
   EXPECT_EQ("6351f0f6e997050e4658bbb4777aef74", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Code128C DISABLED_Code128C
 #else
@@ -135,7 +134,7 @@ TEST_F(BarcodeTest, MAYBE_Code128C) {
   EXPECT_EQ("fba730a807ba6363f9bd2bc7f8c56d1f", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Code128CLetters DISABLED_Code128CLetters
 #else
@@ -148,7 +147,7 @@ TEST_F(BarcodeTest, MAYBE_Code128CLetters) {
   EXPECT_EQ("6284ec8503d5a948c9518108da33cdd3", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Ean8 DISABLED_Ean8
 #else
@@ -166,7 +165,7 @@ TEST_F(BarcodeTest, Ean8Letters) {
   EXPECT_FALSE(barcode()->Encode(L"clams"));
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_UPCA DISABLED_UPCA
 #else
@@ -184,7 +183,7 @@ TEST_F(BarcodeTest, UPCALetters) {
   EXPECT_FALSE(barcode()->Encode(L"clams"));
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Ean13 DISABLED_Ean13
 #else
@@ -202,7 +201,7 @@ TEST_F(BarcodeTest, Ean13Letters) {
   EXPECT_FALSE(barcode()->Encode(L"clams"));
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_Pdf417 DISABLED_Pdf417
 #else
@@ -215,7 +214,7 @@ TEST_F(BarcodeTest, MAYBE_Pdf417) {
   EXPECT_EQ("191e35d11613901b7d5d51033689aa89", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_DataMatrix DISABLED_DataMatrix
 #else
@@ -228,7 +227,7 @@ TEST_F(BarcodeTest, MAYBE_DataMatrix) {
   EXPECT_EQ("5e5cd9a680b86fcd4ffd53ed36e3c980", BitmapChecksum());
 }
 
-// https://crbug.com/pdfium/738
+// https://crbug.com/42271707
 #if defined(PDF_USE_SKIA)
 #define MAYBE_QrCode DISABLED_QrCode
 #else

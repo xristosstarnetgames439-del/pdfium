@@ -10,6 +10,7 @@
 
 #include "constants/form_flags.h"
 #include "core/fpdfdoc/cpdf_bafontmap.h"
+#include "core/fxcrt/cfx_bidi_resolver.h"
 #include "core/fxcrt/containers/contains.h"
 #include "fpdfsdk/cpdfsdk_widget.h"
 #include "fpdfsdk/formfiller/cffl_interactiveformfiller.h"
@@ -26,12 +27,12 @@ CPWL_Wnd::CreateParams CFFL_ListBox::GetCreateParam() {
   CPWL_Wnd::CreateParams cp = CFFL_TextObject::GetCreateParam();
   uint32_t dwFieldFlag = widget_->GetFieldFlags();
   if (dwFieldFlag & pdfium::form_flags::kChoiceMultiSelect) {
-    cp.dwFlags |= PLBS_MULTIPLESEL;
+    cp.dwFlags |= CPWL_Wnd::Styles::kListboxMultipleSel;
   }
 
-  cp.dwFlags |= PWS_VSCROLL;
+  cp.dwFlags |= CPWL_Wnd::Styles::kWindowVScroll;
 
-  if (cp.dwFlags & PWS_AUTOFONTSIZE) {
+  if (cp.dwFlags & CPWL_Wnd::Styles::kWindowAutoFontSize) {
     static constexpr float kDefaultListBoxFontSize = 12.0f;
     cp.fFontSize = kDefaultListBoxFontSize;
   }
@@ -51,7 +52,9 @@ std::unique_ptr<CPWL_Wnd> CFFL_ListBox::NewPWLWindow(
     pWnd->AddString(widget_->GetOptionLabel(i));
   }
 
-  if (pWnd->HasFlag(PLBS_MULTIPLESEL)) {
+  pWnd->SetTextDirection(widget_->GetTextDirection());
+
+  if (pWnd->HasFlag(CPWL_Wnd::Styles::kListboxMultipleSel)) {
     original_selections_.clear();
 
     bool bSetCaret = false;

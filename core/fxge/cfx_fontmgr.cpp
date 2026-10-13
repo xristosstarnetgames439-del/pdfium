@@ -6,149 +6,121 @@
 
 #include "core/fxge/cfx_fontmgr.h"
 
-#include <array>
-#include <iterator>
 #include <memory>
-#include <utility>
 
-#include "core/fxcrt/check_op.h"
-#include "core/fxcrt/fixed_size_data_vector.h"
+#include "core/fxge/cfx_face.h"
+#include "core/fxge/cfx_font.h"
 #include "core/fxge/cfx_fontmapper.h"
-#include "core/fxge/cfx_substfont.h"
-#include "core/fxge/fontdata/chromefontdata/chromefontdata.h"
+#include "core/fxge/cfx_glyphcache.h"
 #include "core/fxge/fx_font.h"
 #include "core/fxge/systemfontinfo_iface.h"
 
+#if defined(PDF_USE_SKIA)
+#include "third_party/skia/include/core/SkFontMgr.h"         // nogncheck
+#include "third_party/skia/include/core/SkStream.h"          // nogncheck
+#include "third_party/skia/include/core/SkTypeface.h"        // nogncheck
+#include "third_party/skia/include/ports/SkFontMgr_empty.h"  // nogncheck
+
+#if defined(PDF_ENABLE_FONTATIONS)
+#include "third_party/skia/include/ports/SkFontMgr_Fontations.h"  // nogncheck
+#endif  // defined(PDF_ENABLE_FONTATIONS)
+
+#if BUILDFLAG(IS_WIN)
+#include "third_party/skia/include/ports/SkTypeface_win.h"  // nogncheck
+#elif BUILDFLAG(IS_APPLE)
+#include "third_party/skia/include/ports/SkFontMgr_mac_ct.h"  // nogncheck
+#endif  // BUILDFLAG(IS_WIN)
+#endif  // PDF_USE_SKIA
+
 namespace {
 
-constexpr std::array<pdfium::span<const uint8_t>,
-                     CFX_FontMapper::kNumStandardFonts>
-    kFoxitFonts = {{
-        kFoxitFixedFontData,
-        kFoxitFixedBoldFontData,
-        kFoxitFixedBoldItalicFontData,
-        kFoxitFixedItalicFontData,
-        kFoxitSansFontData,
-        kFoxitSansBoldFontData,
-        kFoxitSansBoldItalicFontData,
-        kFoxitSansItalicFontData,
-        kFoxitSerifFontData,
-        kFoxitSerifBoldFontData,
-        kFoxitSerifBoldItalicFontData,
-        kFoxitSerifItalicFontData,
-        kFoxitSymbolFontData,
-        kFoxitDingbatsFontData,
-    }};
-
-constexpr pdfium::span<const uint8_t> kGenericSansFont = kFoxitSansMMFontData;
-constexpr pdfium::span<const uint8_t> kGenericSerifFont = kFoxitSerifMMFontData;
-
-FXFT_LibraryRec* FTLibraryInitHelper() {
-  FXFT_LibraryRec* pLibrary = nullptr;
-  FT_Init_FreeType(&pLibrary);
-  return pLibrary;
+#if defined(PDF_USE_SKIA)
+// A singleton SkFontMgr which can be used to decode raw font data or
+// otherwise get access to system fonts.
+sk_sp<SkFontMgr> CreateSkiaFontManagerFallback(
+    CFX_FontMgr::FontBackend backend) {
+#if defined(PDF_USE_SKIA_CUSTOM_FONT_MANAGER)
+  return pdfium_skia_custom_font_manager();
+#else  // defined(PDF_USE_SKIA_CUSTOM_FONT_MANAGER)
+#if defined(PDF_ENABLE_FONTATIONS)
+  if (backend == CFX_FontMgr::FontBackend::kFontations) {
+    // This is a SkFontMgr which will use Fontations to decode font data.
+    return SkFontMgr_New_Fontations_Empty();
+  }
+#endif  // defined(PDF_ENABLE_FONTATIONS)
+#if defined(PDF_ENABLE_FREETYPE)
+  // This is a SkFontMgr which will use FreeType to decode font data.
+  return SkFontMgr_New_Custom_Empty();
+#else
+  return nullptr;
+#endif  // defined(PDF_ENABLE_FREETYPE)
+#endif  // defined(PDF_USE_SKIA_CUSTOM_FONT_MANAGER)
 }
 
+// static
+sk_sp<SkFontMgr> CreateSkiaFontManager(CFX_FontMgr::FontBackend backend) {
+#if BUILDFLAG(IS_WIN)
+  return SkFontMgr_New_DirectWrite();
+#elif BUILDFLAG(IS_APPLE)
+  return SkFontMgr_New_CoreText(nullptr);
+#else
+  // This is a SkFontMgr which will use FreeType to decode font data.
+  return CreateSkiaFontManagerFallback(backend);
+#endif
+}
+#endif  // defined(PDF_USE_SKIA)
 }  // namespace
 
-CFX_FontMgr::FontDesc::FontDesc(FixedSizeDataVector<uint8_t> data)
-    : font_data_(std::move(data)) {}
-
-CFX_FontMgr::FontDesc::~FontDesc() = default;
-
-void CFX_FontMgr::FontDesc::SetFace(size_t index, CFX_Face* face) {
-  CHECK_LT(index, std::size(ttc_faces_));
-  ttc_faces_[index].Reset(face);
+CFX_FontMgr::CFX_FontMgr([[maybe_unused]] FontBackend backend)
+    :
+#if defined(PDF_ENABLE_FREETYPE)
+      ft_library_(InitializeFreeType()),
+#endif
+#if defined(PDF_USE_SKIA)
+      font_backend_(backend),
+      skia_fontmgr_(CreateSkiaFontManager(font_backend_)),
+#endif
+      builtin_mapper_(std::make_unique<CFX_FontMapper>())
+#if defined(PDF_ENABLE_FREETYPE)
+      ,
+      ft_library_supports_hinting_(
+          FreeTypeSetLcdFilterMode(ft_library_.get()) ||
+          FreeTypeVersionSupportsHinting(ft_library_.get()))
+#endif
+{
 }
-
-CFX_Face* CFX_FontMgr::FontDesc::GetFace(size_t index) const {
-  CHECK_LT(index, std::size(ttc_faces_));
-  return ttc_faces_[index].Get();
-}
-
-CFX_FontMgr::CFX_FontMgr()
-    : ft_library_(FTLibraryInitHelper()),
-      builtin_mapper_(std::make_unique<CFX_FontMapper>(this)),
-      ft_library_supports_hinting_(SetLcdFilterMode() ||
-                                   FreeTypeVersionSupportsHinting()) {}
 
 CFX_FontMgr::~CFX_FontMgr() = default;
 
-RetainPtr<CFX_FontMgr::FontDesc> CFX_FontMgr::GetCachedFontDesc(
-    const ByteString& face_name,
-    int weight,
-    bool bItalic) {
-  auto it = face_map_.find({face_name, weight, bItalic});
-  return it != face_map_.end() ? pdfium::WrapRetain(it->second.Get()) : nullptr;
-}
-
-RetainPtr<CFX_FontMgr::FontDesc> CFX_FontMgr::AddCachedFontDesc(
-    const ByteString& face_name,
-    int weight,
-    bool bItalic,
-    FixedSizeDataVector<uint8_t> data) {
-  auto font_desc = pdfium::MakeRetain<FontDesc>(std::move(data));
-  face_map_[{face_name, weight, bItalic}].Reset(font_desc.Get());
-  return font_desc;
-}
-
-RetainPtr<CFX_FontMgr::FontDesc> CFX_FontMgr::GetCachedTTCFontDesc(
-    size_t ttc_size,
-    uint32_t checksum) {
-  auto it = ttc_face_map_.find({ttc_size, checksum});
-  return it != ttc_face_map_.end() ? pdfium::WrapRetain(it->second.Get())
-                                   : nullptr;
-}
-
-RetainPtr<CFX_FontMgr::FontDesc> CFX_FontMgr::AddCachedTTCFontDesc(
-    size_t ttc_size,
-    uint32_t checksum,
-    FixedSizeDataVector<uint8_t> data) {
-  auto pNewDesc = pdfium::MakeRetain<FontDesc>(std::move(data));
-  ttc_face_map_[{ttc_size, checksum}].Reset(pNewDesc.Get());
-  return pNewDesc;
-}
-
-RetainPtr<CFX_Face> CFX_FontMgr::NewFixedFace(RetainPtr<FontDesc> pDesc,
-                                              pdfium::span<const uint8_t> span,
-                                              size_t face_index) {
-  RetainPtr<CFX_Face> face =
-      CFX_Face::New(ft_library_.get(), std::move(pDesc), span,
-                    static_cast<FT_Long>(face_index));
-  if (!face || !face->SetPixelSize(64, 64)) {
-    return nullptr;
+RetainPtr<CFX_GlyphCache> CFX_FontMgr::GetGlyphCache(const CFX_Font* font) {
+  RetainPtr<CFX_Face> face = font->GetFace();
+  auto it = glyph_cache_map_.find(face.Get());
+  if (it != glyph_cache_map_.end() && it->second) {
+    return pdfium::WrapRetain(it->second.Get());
   }
-
-  return face;
+  auto new_cache = pdfium::MakeRetain<CFX_GlyphCache>(face);
+  glyph_cache_map_[face.Get()].Reset(new_cache.Get());
+  return new_cache;
 }
 
-// static
-pdfium::span<const uint8_t> CFX_FontMgr::GetStandardFont(size_t index) {
-  return kFoxitFonts[index];
+#if defined(PDF_USE_SKIA)
+sk_sp<SkTypeface> CFX_FontMgr::MakeSkTypeface(
+    pdfium::span<const uint8_t> font_span) {
+  sk_sp<SkTypeface> result;
+  if (skia_fontmgr_) {
+    result = skia_fontmgr_->makeFromStream(
+        std::make_unique<SkMemoryStream>(font_span.data(), font_span.size()));
+  }
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE)
+  // If DirectWrite or CoreText didn't work, try a fallback font manager.
+  if (!result) {
+    if (!skia_fontmgr_fallback_) {
+      skia_fontmgr_fallback_ = CreateSkiaFontManagerFallback(font_backend_);
+    }
+    result = skia_fontmgr_fallback_->makeFromStream(
+        std::make_unique<SkMemoryStream>(font_span.data(), font_span.size()));
+  }
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE)
+  return result;
 }
-
-// static
-pdfium::span<const uint8_t> CFX_FontMgr::GetGenericSansFont() {
-  return kGenericSansFont;
-}
-
-// static
-pdfium::span<const uint8_t> CFX_FontMgr::GetGenericSerifFont() {
-  return kGenericSerifFont;
-}
-
-bool CFX_FontMgr::FreeTypeVersionSupportsHinting() const {
-  FT_Int major;
-  FT_Int minor;
-  FT_Int patch;
-  FT_Library_Version(ft_library_.get(), &major, &minor, &patch);
-  // Freetype versions >= 2.8.1 support hinting even if subpixel rendering is
-  // disabled. https://sourceforge.net/projects/freetype/files/freetype2/2.8.1/
-  return major > 2 || (major == 2 && minor > 8) ||
-         (major == 2 && minor == 8 && patch >= 1);
-}
-
-bool CFX_FontMgr::SetLcdFilterMode() const {
-  return FT_Library_SetLcdFilter(ft_library_.get(), FT_LCD_FILTER_DEFAULT) !=
-         FT_Err_Unimplemented_Feature;
-}
+#endif  // defined(PDF_USE_SKIA)

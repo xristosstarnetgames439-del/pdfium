@@ -59,7 +59,24 @@ TEST(CPDFToUnicodeMapTest, StringToWideString) {
   EXPECT_EQ(res, CPDF_ToUnicodeMap::StringToWideString("<c2ab FaAb>"));
   EXPECT_EQ(res, CPDF_ToUnicodeMap::StringToWideString("<c2ab FaAb12>"));
   EXPECT_EQ(res, CPDF_ToUnicodeMap::StringToWideString("<c2ab FaAb 12>"));
-  EXPECT_EQ(res, CPDF_ToUnicodeMap::StringToWideString("< c 2 a b  F a A b  1 2 >"));
+  EXPECT_EQ(res,
+            CPDF_ToUnicodeMap::StringToWideString("< c 2 a b  F a A b  1 2 >"));
+}
+
+TEST(CPDFToUnicodeMapTest, HandleBeginBFCharRejectsInvalidCidValues) {
+  static constexpr const char* kInputs[] = {
+      "1 beginbfchar<00NN><0041>endbfchar",
+      "1 beginbfchar<100000000><0041>endbfchar",
+  };
+
+  for (const char* input : kInputs) {
+    auto stream =
+        pdfium::MakeRetain<CPDF_Stream>(ByteStringView(input).unsigned_span());
+    CPDF_ToUnicodeMap map(stream);
+    EXPECT_EQ(L"", map.Lookup(0));
+    EXPECT_EQ(0u, map.ReverseLookup(0x0041));
+    EXPECT_EQ(0u, map.GetUnicodeCountByCharcodeForTesting(0u));
+  }
 }
 
 TEST(CPDFToUnicodeMapTest, HandleBeginBFCharBadCount) {
@@ -318,7 +335,29 @@ TEST(CPDFToUnicodeMapTest, HandleBeginBFRangeGoodCount) {
   EXPECT_EQ(0u, map.GetUnicodeCountByCharcodeForTesting(6u));
 }
 
-TEST(CPDFToUnicodeMapTest, InsertIntoMultimap) {
+TEST(CPDFToUnicodeMapTest, HandleBeginBFRangeDestLargeValue) {
+  static constexpr uint8_t kInput[] =
+      "1 beginbfrange<0010><00ff><fff0>endbfrange";
+  auto stream = pdfium::MakeRetain<CPDF_Stream>(kInput);
+  CPDF_ToUnicodeMap map(stream);
+  EXPECT_EQ(L"\xfff0", map.Lookup(0x10));
+  EXPECT_EQ(L"\xfff1", map.Lookup(0x11));
+  // TODO(thestig): Should this return L"\xffff"?
+  EXPECT_EQ(L"", map.Lookup(0x1f));
+  EXPECT_EQ(L"", map.Lookup(0x20));
+  EXPECT_EQ(16u, map.ReverseLookup(0xfff0));
+  EXPECT_EQ(17u, map.ReverseLookup(0xfff1));
+  EXPECT_EQ(31u, map.ReverseLookup(0xffff));
+#if defined(WCHAR_T_IS_32_BIT)
+  // TODO(crbug.com/374947848): Should be able to make this call if wchar_t is
+  // 16-bit.
+  // TODO(thestig): Should this reverse lookup work when the corresponding
+  // Lookup() call does not work?
+  EXPECT_EQ(32u, map.ReverseLookup(0x10000));
+#endif
+}
+
+TEST(CPDFToUnicodeMapTest, InsertIntoMaps) {
   {
     // Both the CIDs and the unicodes are different.
     static constexpr uint8_t kInput1[] =
@@ -342,7 +381,7 @@ TEST(CPDFToUnicodeMapTest, InsertIntoMultimap) {
   }
   {
     // Duplicate mappings of CID 0 to unicode "A". There should be only 1 entry
-    // in `multimap_`.
+    // in `reverse_map_`.
     static constexpr uint8_t kInput3[] =
         "1 beginbfrange<0><0>[<0041>]endbfrange\n"
         "1 beginbfchar<0><0041>endbfchar";
@@ -350,6 +389,43 @@ TEST(CPDFToUnicodeMapTest, InsertIntoMultimap) {
     CPDF_ToUnicodeMap map(stream);
     EXPECT_EQ(0u, map.ReverseLookup(0x0041));
     EXPECT_EQ(1u, map.GetUnicodeCountByCharcodeForTesting(0u));
+  }
+}
+
+TEST(CPDFToUnicodeMapTest, SucceedingMapsSupersedePreceding) {
+  // Adobe TN #5014: "Code mappings (unlike codespace ranges) may overlap, but
+  // succeeding maps superceded preceding maps." Subset fonts commonly rely on
+  // this, emitting a catch-all bfrange and then overriding individual codes.
+  {
+    // bfchar entries override an earlier catch-all bfrange, including when the
+    // unicode is numerically above the charcode.
+    static constexpr uint8_t kInput1[] =
+        "1 beginbfrange<00><FF><0000>endbfrange\n"
+        "3 beginbfchar<41><00F3><42><00BA><43><20AC>endbfchar";
+    CPDF_ToUnicodeMap map(pdfium::MakeRetain<CPDF_Stream>(kInput1));
+    EXPECT_EQ(L"\u00f3", map.Lookup(0x41));
+    EXPECT_EQ(L"\u00ba", map.Lookup(0x42));
+    EXPECT_EQ(L"\u20ac", map.Lookup(0x43));
+    // A charcode no later entry mentions keeps the range's mapping.
+    EXPECT_EQ(L"D", map.Lookup(0x44));
+  }
+  {
+    // A later bfrange overrides an earlier one the same way.
+    static constexpr uint8_t kInput2[] =
+        "1 beginbfrange<00><FF><0000>endbfrange\n"
+        "1 beginbfrange<70><71><00E9>endbfrange";
+    CPDF_ToUnicodeMap map(pdfium::MakeRetain<CPDF_Stream>(kInput2));
+    EXPECT_EQ(L"\u00e9", map.Lookup(0x70));
+    EXPECT_EQ(L"\u00ea", map.Lookup(0x71));
+    EXPECT_EQ(L"r", map.Lookup(0x72));
+  }
+  {
+    // A mapping to a lower unicode also wins when it comes later.
+    static constexpr uint8_t kInput3[] =
+        "1 beginbfchar<41><00F3>endbfchar\n"
+        "1 beginbfchar<41><0041>endbfchar";
+    CPDF_ToUnicodeMap map(pdfium::MakeRetain<CPDF_Stream>(kInput3));
+    EXPECT_EQ(L"A", map.Lookup(0x41));
   }
 }
 

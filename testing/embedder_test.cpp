@@ -13,11 +13,20 @@
 #include "core/fdrm/fx_crypt.h"
 #include "core/fxcrt/check.h"
 #include "core/fxcrt/check_op.h"
+#include "core/fxcrt/compiler_specific.h"
 #include "core/fxcrt/containers/contains.h"
+#include "core/fxcrt/containers/to_vector.h"
 #include "core/fxcrt/fx_memcpy_wrappers.h"
+#include "core/fxcrt/fx_safe_types.h"
+#include "core/fxcrt/notreached.h"
 #include "core/fxcrt/numerics/checked_math.h"
 #include "core/fxcrt/numerics/safe_conversions.h"
+#include "core/fxcrt/span_util.h"
+#include "core/fxcrt/zip.h"
+#include "core/fxge/cfx_gemodule.h"
+#include "core/fxge/dib/fx_dib.h"
 #include "fpdfsdk/cpdfsdk_helpers.h"
+#include "fpdfsdk/display_list_renderer.h"
 #include "public/cpp/fpdf_scopers.h"
 #include "public/fpdf_dataavail.h"
 #include "public/fpdf_edit.h"
@@ -25,11 +34,14 @@
 #include "public/fpdfview.h"
 #include "testing/embedder_test_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "testing/png_codec/png_codec.h"
 #include "testing/test_loader.h"
 #include "testing/utils/bitmap_saver.h"
 #include "testing/utils/file_util.h"
 #include "testing/utils/hash.h"
 #include "testing/utils/path_service.h"
+#include "testing/utils/pixel_diff_util.h"
+#include "third_party/simdutf/simdutf.h"
 
 namespace {
 
@@ -103,6 +115,12 @@ void OnFocusChangeTrampoline(FPDF_FORMFILLINFO* info,
   return delegate->OnFocusChange(info, annot, page_index);
 }
 
+void ExecuteNamedActionTrampoline(FPDF_FORMFILLINFO* info,
+                                  FPDF_BYTESTRING name) {
+  auto* delegate = static_cast<EmbedderTest*>(info)->GetDelegate();
+  return delegate->ExecuteNamedAction(name);
+}
+
 void DoURIActionWithKeyboardModifierTrampoline(FPDF_FORMFILLINFO* info,
                                                FPDF_BYTESTRING uri,
                                                int modifiers) {
@@ -140,8 +158,6 @@ FPDF_PAGE GetCurrentPageStub(FPDF_FORMFILLINFO* pThis, FPDF_DOCUMENT document) {
 int GetRotationStub(FPDF_FORMFILLINFO* pThis, FPDF_PAGE page) {
   return 0;
 }
-
-void ExecuteNamedActionStub(FPDF_FORMFILLINFO* pThis, FPDF_BYTESTRING name) {}
 
 void SetTextFieldFocusStub(FPDF_FORMFILLINFO* pThis,
                            FPDF_WIDESTRING value,
@@ -230,8 +246,8 @@ FPDF_FILEHANDLER* DownloadFromURLStub(FPDF_FORMFILLINFO* pThis,
       [](void*) -> void {},
       [](void*) -> FPDF_DWORD { return sizeof(kString) - 1; },
       [](void*, FPDF_DWORD off, void* buffer, FPDF_DWORD size) -> FPDF_RESULT {
-        FXSYS_memcpy(buffer, kString,
-                     std::min<size_t>(size, sizeof(kString) - 1));
+        UNSAFE_TODO(FXSYS_memcpy(buffer, kString,
+                                 std::min<size_t>(size, sizeof(kString) - 1)));
         return 0;
       },
       [](void*, FPDF_DWORD, const void*, FPDF_DWORD) -> FPDF_RESULT {
@@ -262,6 +278,312 @@ FPDF_BOOL PutRequestURLStub(FPDF_FORMFILLINFO* pThis,
 }
 #endif  // PDF_ENABLE_XFA
 
+std::string_view GetPlatformNameSuffix() {
+#if BUILDFLAG(IS_WIN)
+  return "_win";
+#elif BUILDFLAG(IS_APPLE)
+  return "_mac";
+#else
+  return "_linux";
+#endif
+}
+
+std::string_view GetCpuArchSuffix() {
+#if BUILDFLAG(IS_APPLE) && !defined(ARCH_CPU_ARM64)
+  return "_x86";
+#else
+  return "";
+#endif  // BUILDFLAG(IS_APPLE) && !defined(ARCH_CPU_ARM64)
+}
+
+std::string GetEmbedderTestExpectationPath(std::string_view expectation_name,
+                                           std::string_view expectation_ext) {
+  std::string path = PathService::GetTestFilePath("embedder_tests");
+  if (path.empty()) {
+    return std::string();
+  }
+
+  path.push_back(PATH_SEPARATOR);
+  path.append(expectation_name);
+  path.push_back('.');
+  path.append(expectation_ext);
+  return path;
+}
+
+std::string GetEmbedderTestPngExpectationPath(
+    std::string_view expectation_name) {
+  return GetEmbedderTestExpectationPath(expectation_name, "png");
+}
+
+std::string GetEmbedderTestDisplayListExpectationPath(
+    std::string_view expectation_name) {
+  return GetEmbedderTestExpectationPath(expectation_name, "dump.txt");
+}
+
+std::vector<std::string> GetEmbedderTestExpectationsWithSuffixPath(
+    std::string_view expectation_png_name) {
+  const std::string basename(expectation_png_name);
+  const std::string platform_suffix(GetPlatformNameSuffix());
+  const std::string cpu_arch_suffix(GetCpuArchSuffix());
+  const bool has_cpu_arch_suffix = !cpu_arch_suffix.empty();
+
+  std::string renderer = "_agg";
+#if defined(PDF_USE_SKIA)
+  if (CFX_GEModule::IsSkiaRenderer()) {
+    renderer = "_skia";
+  }
+#endif
+
+  std::vector<std::string> expectation_names;
+  expectation_names.reserve(has_cpu_arch_suffix ? 6 : 4);
+
+  if (has_cpu_arch_suffix) {
+    expectation_names.push_back(basename + renderer + platform_suffix +
+                                cpu_arch_suffix);
+  }
+  expectation_names.push_back(basename + renderer + platform_suffix);
+  expectation_names.push_back(basename + renderer);
+
+  if (has_cpu_arch_suffix) {
+    expectation_names.push_back(basename + platform_suffix + cpu_arch_suffix);
+  }
+  expectation_names.push_back(basename + platform_suffix);
+  expectation_names.push_back(basename);
+
+  std::vector<std::string> results;
+  for (const auto& name : expectation_names) {
+    results.push_back(GetEmbedderTestPngExpectationPath(name));
+    if (results.back().empty()) {
+      return {};
+    }
+  }
+  return results;
+}
+
+struct DecodedPng {
+  int width = -1;
+  int height = -1;
+  std::vector<uint8_t> pixel_data;  // BGRA
+};
+
+DecodedPng DecodePngData(pdfium::span<const uint8_t> png_data) {
+  DecodedPng results;
+
+  int width = -1;
+  int height = -1;
+  std::vector<uint8_t> decoded_png =
+      png_codec::Decode(png_data, /*reverse_byte_order=*/true, &width, &height);
+  if (width > 0 && height > 0 && !decoded_png.empty()) {
+    results.width = width;
+    results.height = height;
+    results.pixel_data = std::move(decoded_png);
+  }
+  return results;
+}
+
+int CompareBGRxBitmapToPng(pdfium::span<const uint8_t> bitmap_span,
+                           size_t bitmap_stride,
+                           const DecodedPng& decoded_png,
+                           const DiffOptions& options) {
+  auto decoded_png_span32 = fxcrt::reinterpret_span<const uint32_t>(
+      pdfium::span(decoded_png.pixel_data));
+  auto bitmap_span32 = fxcrt::reinterpret_span<const uint32_t>(bitmap_span);
+  return CalculatePixelsDifferent(
+      decoded_png_span32, static_cast<size_t>(decoded_png.width), bitmap_span32,
+      bitmap_stride / sizeof(uint32_t), decoded_png.width, decoded_png.height,
+      options);
+}
+
+int CompareGrayBitmapToPng(pdfium::span<const uint8_t> bitmap_span,
+                           size_t bitmap_stride,
+                           const DecodedPng& decoded_png,
+                           const DiffOptions& options) {
+  const int width = decoded_png.width;
+  const size_t dest_row_width = static_cast<size_t>(width);
+  const int height = decoded_png.height;
+  const size_t bgrx_stride = width * sizeof(FX_BGRA_STRUCT<uint8_t>);
+  std::vector<uint8_t> bgrx_buffer(bgrx_stride * height);
+  auto bgrx_span = fxcrt::reinterpret_span<FX_BGRA_STRUCT<uint8_t>>(
+      pdfium::span<uint8_t>(bgrx_buffer));
+  for (int h = 0; h < height; ++h) {
+    auto src_row = bitmap_span.subspan(h * bitmap_stride, bitmap_stride);
+    auto dest_row = bgrx_span.take_first(dest_row_width);
+    for (auto [src_pixel, dest_pixel] : fxcrt::Zip(src_row, dest_row)) {
+      dest_pixel.blue = src_pixel;
+      dest_pixel.green = src_pixel;
+      dest_pixel.red = src_pixel;
+      dest_pixel.alpha = 255;
+    }
+  }
+  return CompareBGRxBitmapToPng(bgrx_buffer, bgrx_stride, decoded_png, options);
+}
+
+#ifdef PDF_USE_SKIA
+int CompareBGRxPremultBitmapToPng(pdfium::span<const uint8_t> bitmap_span,
+                                  size_t bitmap_stride,
+                                  const DecodedPng& decoded_png,
+                                  const DiffOptions& options) {
+  std::vector<uint8_t> bitmap_data = pdfium::ToVector(bitmap_span);
+  pdfium::span<uint8_t> converted_bitmap_span{bitmap_data};
+
+  for (int h = 0; h < decoded_png.height; ++h) {
+    auto bitmap_row = fxcrt::reinterpret_span<FX_BGRA_STRUCT<uint8_t>>(
+        converted_bitmap_span.first(bitmap_stride));
+    converted_bitmap_span = converted_bitmap_span.subspan(bitmap_stride);
+    for (int w = 0; w < decoded_png.width; ++w) {
+      bitmap_row[w] = UnPreMultiplyColor(bitmap_row[w]);
+    }
+  }
+  return CompareBGRxBitmapToPng(bitmap_data, bitmap_stride, decoded_png,
+                                options);
+}
+#endif  // PDF_USE_SKIA
+
+int CompareBGRBitmapToPng(pdfium::span<const uint8_t> bitmap_span,
+                          size_t bitmap_stride,
+                          const DecodedPng& decoded_png,
+                          const DiffOptions& options) {
+  const int width = decoded_png.width;
+  const size_t dest_row_width = static_cast<size_t>(width);
+  const int height = decoded_png.height;
+  const size_t bgrx_stride = width * sizeof(FX_BGRA_STRUCT<uint8_t>);
+  std::vector<uint8_t> bgrx_buffer(bgrx_stride * height);
+  auto bgrx_span = fxcrt::reinterpret_span<FX_BGRA_STRUCT<uint8_t>>(
+      pdfium::span<uint8_t>(bgrx_buffer));
+  for (int h = 0; h < height; ++h) {
+    auto src_row = fxcrt::reinterpret_span<const FX_BGR_STRUCT<uint8_t>>(
+        bitmap_span.subspan(h * bitmap_stride, bitmap_stride));
+    auto dest_row = bgrx_span.take_first(dest_row_width);
+    for (int w = 0; w < width; ++w) {
+      dest_row[w].blue = src_row[w].blue;
+      dest_row[w].green = src_row[w].green;
+      dest_row[w].red = src_row[w].red;
+      dest_row[w].alpha = 255;
+    }
+  }
+  return CompareBGRxBitmapToPng(bgrx_buffer, bgrx_stride, decoded_png, options);
+}
+
+int CompareBGRABitmapToPng(pdfium::span<const uint8_t> bitmap_span,
+                           size_t bitmap_stride,
+                           const DecodedPng& decoded_png,
+                           const DiffOptions& options) {
+  const int width = decoded_png.width;
+  const size_t dest_row_width = static_cast<size_t>(width);
+  const int height = decoded_png.height;
+  const size_t bgra_stride = width * sizeof(FX_BGRA_STRUCT<uint8_t>);
+
+  // Premultiply both decoded PNG and actual bitmap so unweighted color
+  // channels in transparent or near-transparent pixels do not trigger
+  // false-positive differences.
+  std::vector<uint8_t> actual_premult(bgra_stride * height);
+  auto actual_span = fxcrt::reinterpret_span<FX_BGRA_STRUCT<uint8_t>>(
+      pdfium::span<uint8_t>(actual_premult));
+  for (int h = 0; h < height; ++h) {
+    auto src_row = fxcrt::reinterpret_span<const FX_BGRA_STRUCT<uint8_t>>(
+        bitmap_span.subspan(h * bitmap_stride, bitmap_stride));
+    auto dest_row = actual_span.take_first(dest_row_width);
+    for (size_t w = 0; w < dest_row_width; ++w) {
+      dest_row[w] = PreMultiplyColor(src_row[w]);
+    }
+  }
+
+  std::vector<uint8_t> expected_premult(decoded_png.pixel_data);
+  auto expected_span = fxcrt::reinterpret_span<FX_BGRA_STRUCT<uint8_t>>(
+      pdfium::span<uint8_t>(expected_premult));
+  for (auto& pixel : expected_span) {
+    pixel = PreMultiplyColor(pixel);
+  }
+
+  DecodedPng premult_png;
+  premult_png.width = width;
+  premult_png.height = height;
+  premult_png.pixel_data = std::move(expected_premult);
+
+  return CompareBGRxBitmapToPng(actual_premult, bgra_stride, premult_png,
+                                options);
+}
+
+std::string EncodeBase64(pdfium::span<const uint8_t> png) {
+  std::string base64_png(simdutf::base64_length_from_binary(png.size()), '\0');
+  size_t base64_len = simdutf::binary_to_base64(png, base64_png);
+  CHECK_EQ(base64_len, base64_png.size());
+  return "data:image/png;base64," + base64_png;
+}
+
+std::string EncodeBase64Png(FPDF_BITMAP bitmap) {
+  return EncodeBase64(BitmapSaver::EncodeBitmapToPng(bitmap));
+}
+
+void ReportMissingExpectation(FPDF_BITMAP bitmap) {
+  ADD_FAILURE() << "No matching expectation file!\n"
+                << "Actual pixels (open in browser):\n"
+                << EncodeBase64Png(bitmap);
+}
+
+void CompareBitmapToPngFile(FPDF_BITMAP bitmap,
+                            const std::string& png_path,
+                            const DiffOptions& options) {
+  std::vector<uint8_t> png_data = GetFileContents(png_path.c_str());
+  if (png_data.empty()) {
+    ReportMissingExpectation(bitmap);
+    return;
+  }
+  DecodedPng decoded_png = DecodePngData(png_data);
+  ASSERT_GT(decoded_png.width, 0);
+  ASSERT_GT(decoded_png.height, 0);
+  ASSERT_FALSE(decoded_png.pixel_data.empty());
+
+  const int stride = FPDFBitmap_GetStride(bitmap);
+  const int width = FPDFBitmap_GetWidth(bitmap);
+  const int height = FPDFBitmap_GetHeight(bitmap);
+  ASSERT_GT(stride, 0);
+  ASSERT_EQ(width, decoded_png.width);
+  ASSERT_EQ(height, decoded_png.height);
+
+  FX_SAFE_SIZE_T size = stride;
+  size *= height;
+  auto bitmap_span = UNSAFE_TODO(
+      pdfium::span(static_cast<const uint8_t*>(FPDFBitmap_GetBuffer(bitmap)),
+                   size.ValueOrDie()));
+
+  int pixels_different;
+  switch (FPDFBitmap_GetFormat(bitmap)) {
+    case FPDFBitmap_Gray:
+      pixels_different =
+          CompareGrayBitmapToPng(bitmap_span, stride, decoded_png, options);
+      break;
+    case FPDFBitmap_BGR:
+      pixels_different =
+          CompareBGRBitmapToPng(bitmap_span, stride, decoded_png, options);
+      break;
+    case FPDFBitmap_BGRx: {
+      pixels_different =
+          CompareBGRxBitmapToPng(bitmap_span, stride, decoded_png, options);
+      break;
+    }
+    case FPDFBitmap_BGRA: {
+      pixels_different =
+          CompareBGRABitmapToPng(bitmap_span, stride, decoded_png, options);
+      break;
+    }
+#ifdef PDF_USE_SKIA
+    case FPDFBitmap_BGRA_Premul:
+      pixels_different = CompareBGRxPremultBitmapToPng(bitmap_span, stride,
+                                                       decoded_png, options);
+      break;
+#endif  // PDF_USE_SKIA
+    default:
+      // Support other formats as-needed.
+      NOTREACHED();
+  }
+  EXPECT_EQ(pixels_different, 0) << "Pixels do not match!\n"
+                                 << "Actual pixels (open in browser):\n"
+                                 << EncodeBase64Png(bitmap) << "\n"
+                                 << "Expected pixels (open in browser):\n"
+                                 << EncodeBase64(png_data) << "\n";
+}
+
 }  // namespace
 
 EmbedderTest::EmbedderTest()
@@ -287,9 +609,15 @@ void EmbedderTest::TearDown() {
   // possible. This can fail when an DCHECK test fails in a test case.
   EXPECT_EQ(0U, page_map_.size());
   EXPECT_EQ(0U, saved_page_map_.size());
+
+  // Document teardown can invoke delegate callbacks, so keep the current
+  // delegate installed until CloseDocument() completes. Point `delegate_` back
+  // to the default delegate before destroying the owned delegate.
   if (document()) {
     CloseDocument();
   }
+  delegate_ = default_delegate_.get();
+  owned_delegate_.reset();
 }
 
 void EmbedderTest::CreateEmptyDocument() {
@@ -304,32 +632,31 @@ void EmbedderTest::CreateEmptyDocumentWithoutFormFillEnvironment() {
 }
 
 bool EmbedderTest::OpenDocument(const std::string& filename) {
-  return OpenDocumentWithOptions(filename, nullptr,
+  return OpenDocumentWithOptions(filename, "",
                                  LinearizeOption::kDefaultLinearize,
                                  JavaScriptOption::kEnableJavaScript);
 }
 
 bool EmbedderTest::OpenDocumentLinearized(const std::string& filename) {
-  return OpenDocumentWithOptions(filename, nullptr,
-                                 LinearizeOption::kMustLinearize,
+  return OpenDocumentWithOptions(filename, "", LinearizeOption::kMustLinearize,
                                  JavaScriptOption::kEnableJavaScript);
 }
 
 bool EmbedderTest::OpenDocumentWithPassword(const std::string& filename,
-                                            const char* password) {
+                                            const ByteString& password) {
   return OpenDocumentWithOptions(filename, password,
                                  LinearizeOption::kDefaultLinearize,
                                  JavaScriptOption::kEnableJavaScript);
 }
 
 bool EmbedderTest::OpenDocumentWithoutJavaScript(const std::string& filename) {
-  return OpenDocumentWithOptions(filename, nullptr,
+  return OpenDocumentWithOptions(filename, "",
                                  LinearizeOption::kDefaultLinearize,
                                  JavaScriptOption::kDisableJavaScript);
 }
 
 bool EmbedderTest::OpenDocumentWithOptions(const std::string& filename,
-                                           const char* password,
+                                           const ByteString& password,
                                            LinearizeOption linearize_option,
                                            JavaScriptOption javascript_option) {
   std::string file_path = PathService::GetTestFilePath(filename);
@@ -357,7 +684,7 @@ bool EmbedderTest::OpenDocumentWithOptions(const std::string& filename,
                             &form_handle_);
 }
 
-bool EmbedderTest::OpenDocumentHelper(const char* password,
+bool EmbedderTest::OpenDocumentHelper(const ByteString& password,
                                       LinearizeOption linearize_option,
                                       JavaScriptOption javascript_option,
                                       FakeFileAccess* network_simulator,
@@ -381,7 +708,7 @@ bool EmbedderTest::OpenDocumentHelper(const char* password,
       return false;
     }
 
-    document->reset(FPDFAvail_GetDocument(avail_ptr, password));
+    document->reset(FPDFAvail_GetDocument(avail_ptr, password.c_str()));
     document_ptr = document->get();
     if (!document_ptr) {
       return false;
@@ -414,8 +741,8 @@ bool EmbedderTest::OpenDocumentHelper(const char* password,
       return false;
     }
     network_simulator->SetWholeFileAvailable();
-    document->reset(
-        FPDF_LoadCustomDocument(network_simulator->GetFileAccess(), password));
+    document->reset(FPDF_LoadCustomDocument(network_simulator->GetFileAccess(),
+                                            password.c_str()));
     document_ptr = document->get();
     if (!document_ptr) {
       return false;
@@ -463,7 +790,7 @@ FPDF_FORMHANDLE EmbedderTest::SetupFormFillEnvironment(
   formfillinfo->FFI_GetPage = GetPageTrampoline;
   formfillinfo->FFI_GetCurrentPage = GetCurrentPageStub;
   formfillinfo->FFI_GetRotation = GetRotationStub;
-  formfillinfo->FFI_ExecuteNamedAction = ExecuteNamedActionStub;
+  formfillinfo->FFI_ExecuteNamedAction = ExecuteNamedActionTrampoline;
   formfillinfo->FFI_SetTextFieldFocus = SetTextFieldFocusStub;
   formfillinfo->FFI_DoURIAction = DoURIActionTrampoline;
   formfillinfo->FFI_DoGoToAction = DoGoToActionTrampoline;
@@ -620,6 +947,41 @@ ScopedFPDFBitmap EmbedderTest::RenderPage(FPDF_PAGE page) {
   return RenderPageWithFlags(page, nullptr, 0);
 }
 
+std::string EmbedderTest::RenderLoadedPageToDisplayList(FPDF_PAGE page) {
+  return RenderLoadedPageWithFlagsToDisplayList(page, 0);
+}
+
+std::string EmbedderTest::RenderLoadedPageWithFlagsToDisplayList(FPDF_PAGE page,
+                                                                 int flags) {
+  int page_index = GetPageNumberForLoadedPage(page);
+  CHECK_GE(page_index, 0);
+  return RenderPageWithFlagsToDisplayList(page, form_handle(), flags);
+}
+
+std::string EmbedderTest::RenderSavedPageToDisplayList(FPDF_PAGE page) {
+  return RenderSavedPageWithFlagsToDisplayList(page, 0);
+}
+
+std::string EmbedderTest::RenderSavedPageWithFlagsToDisplayList(FPDF_PAGE page,
+                                                                int flags) {
+  int page_index = GetPageNumberForSavedPage(page);
+  CHECK_GE(page_index, 0);
+  return RenderPageWithFlagsToDisplayList(page, saved_form_handle(), flags);
+}
+
+// static
+std::string EmbedderTest::RenderPageWithFlagsToDisplayList(
+    FPDF_PAGE page,
+    FPDF_FORMHANDLE handle,
+    int flags) {
+  return DisplayListRenderer::RenderPage(page, handle, flags);
+}
+
+// static
+std::string EmbedderTest::RenderPageToDisplayList(FPDF_PAGE page) {
+  return RenderPageWithFlagsToDisplayList(page, nullptr, 0);
+}
+
 #if BUILDFLAG(IS_WIN)
 // static
 std::vector<uint8_t> EmbedderTest::RenderPageWithFlagsToEmf(FPDF_PAGE page,
@@ -677,7 +1039,7 @@ std::string EmbedderTest::GetPostScriptFromEmf(
     const auto* comment = reinterpret_cast<const EMRGDICOMMENT*>(record);
     const char* data = reinterpret_cast<const char*>(comment->Data);
     uint16_t size = *reinterpret_cast<const uint16_t*>(data);
-    data += 2;
+    UNSAFE_TODO(data += 2);
     ps_data.append(data, size);
   }
   DeleteEnhMetaFile(emf);
@@ -689,8 +1051,13 @@ EmbedderTest::ScopedSavedDoc EmbedderTest::OpenScopedSavedDocument() {
   return ScopedSavedDoc(this);
 }
 
+EmbedderTest::ScopedSavedDoc EmbedderTest::OpenScopedSavedDocumentWithPassword(
+    const ByteString& password) {
+  return ScopedSavedDoc(this, password);
+}
+
 FPDF_DOCUMENT EmbedderTest::OpenSavedDocument() {
-  return OpenSavedDocumentWithPassword(nullptr);
+  return OpenSavedDocumentWithPassword("");
 }
 
 // static
@@ -701,7 +1068,7 @@ int EmbedderTest::BytesPerPixelForFormat(int format) {
 }
 
 FPDF_DOCUMENT EmbedderTest::OpenSavedDocumentWithPassword(
-    const char* password) {
+    const ByteString& password) {
   // Copy data to prevent clearing it before saved document close.
   saved_document_file_data_ = data_string_;
   saved_file_access_ = {
@@ -762,22 +1129,75 @@ void EmbedderTest::CloseSavedPage(FPDF_PAGE page) {
 }
 
 void EmbedderTest::VerifySavedRendering(FPDF_PAGE page,
-                                        int width,
-                                        int height,
-                                        const char* md5) {
-  CHECK(saved_document());
-  CHECK(page);
-
-  ScopedFPDFBitmap bitmap = RenderSavedPageWithFlags(page, FPDF_ANNOT);
-  CompareBitmap(bitmap.get(), width, height, md5);
+                                        std::string_view expectation_png_name) {
+  ScopedFPDFBitmap bitmap = VerifySavedRenderingCommon(page);
+  CompareBitmap(bitmap.get(), expectation_png_name);
 }
 
-void EmbedderTest::VerifySavedDocument(int width, int height, const char* md5) {
-  ASSERT_TRUE(OpenSavedDocument());
-  FPDF_PAGE page = LoadSavedPage(0);
-  VerifySavedRendering(page, width, height, md5);
-  CloseSavedPage(page);
-  CloseSavedDocument();
+void EmbedderTest::VerifySavedRenderingWithExpectationSuffix(
+    FPDF_PAGE page,
+    std::string_view expectation_png_name,
+    const DiffOptions& options) {
+  ScopedFPDFBitmap bitmap = VerifySavedRenderingCommon(page);
+  CompareBitmapWithExpectationSuffix(bitmap.get(), expectation_png_name,
+                                     options);
+}
+
+ScopedFPDFBitmap EmbedderTest::VerifySavedRenderingCommon(FPDF_PAGE page) {
+  CHECK(page);
+  CHECK(saved_document());
+  return RenderSavedPageWithFlags(page, FPDF_ANNOT);
+}
+
+void EmbedderTest::VerifySavedDocument(std::string_view expectation_png_name) {
+  ScopedFPDFBitmap bitmap = VerifySavedDocumentCommon();
+  CompareBitmap(bitmap.get(), expectation_png_name);
+}
+
+void EmbedderTest::VerifySavedDocumentWithExpectationSuffix(
+    std::string_view expectation_png_name,
+    const DiffOptions& options) {
+  ScopedFPDFBitmap bitmap = VerifySavedDocumentCommon();
+  CompareBitmapWithExpectationSuffix(bitmap.get(), expectation_png_name,
+                                     options);
+}
+
+void EmbedderTest::VerifySavedRenderingWithDisplayList(
+    FPDF_PAGE page,
+    std::string_view expectation_name,
+    int flags) {
+  CHECK(page);
+  CHECK(saved_document());
+  std::string display_list = RenderSavedPageWithFlagsToDisplayList(page, flags);
+  CompareDisplayList(display_list, expectation_name);
+}
+
+void EmbedderTest::VerifySavedDocumentWithDisplayList(
+    std::string_view expectation_name,
+    int flags) {
+  ScopedSavedDoc saved_doc = OpenScopedSavedDocument();
+  if (!saved_doc) {
+    ADD_FAILURE() << "Failed to open saved document";
+    return;
+  }
+
+  ScopedSavedPage page = LoadScopedSavedPage(0);
+  if (!page) {
+    ADD_FAILURE() << "Failed to load page 0 from saved document";
+    return;
+  }
+
+  VerifySavedRenderingWithDisplayList(page.get(), expectation_name, flags);
+}
+
+ScopedFPDFBitmap EmbedderTest::VerifySavedDocumentCommon() {
+  ScopedSavedDoc saved_doc = OpenScopedSavedDocument();
+  if (!saved_doc) {
+    return nullptr;
+  }
+
+  ScopedSavedPage page = LoadScopedSavedPage(0);
+  return VerifySavedRenderingCommon(page.get());
 }
 
 void EmbedderTest::SetWholeFileAvailable() {
@@ -808,17 +1228,18 @@ std::string EmbedderTest::HashBitmap(FPDF_BITMAP bitmap) {
   int usable_bytes_per_row =
       GetBitmapBytesPerPixel(bitmap) * FPDFBitmap_GetWidth(bitmap);
   int height = FPDFBitmap_GetHeight(bitmap);
-  auto span = pdfium::span(static_cast<uint8_t*>(FPDFBitmap_GetBuffer(bitmap)),
-                           static_cast<size_t>(stride) * height);
+  auto span = UNSAFE_TODO(
+      pdfium::span(static_cast<uint8_t*>(FPDFBitmap_GetBuffer(bitmap)),
+                   static_cast<size_t>(stride) * height));
 
-  CRYPT_md5_context context = CRYPT_MD5Start();
+  CryptMd5Context context = CryptMd5Start();
   for (int i = 0; i < height; ++i) {
-    CRYPT_MD5Update(&context,
-                    span.subspan(static_cast<size_t>(i * stride),
-                                 static_cast<size_t>(usable_bytes_per_row)));
+    CryptMd5Update(&context,
+                   span.subspan(static_cast<size_t>(i * stride),
+                                static_cast<size_t>(usable_bytes_per_row)));
   }
   uint8_t digest[16];
-  CRYPT_MD5Finish(&context, digest);
+  CryptMd5Finish(&context, digest);
   return CryptToBase16(digest);
 }
 
@@ -830,27 +1251,75 @@ void EmbedderTest::WriteBitmapToPng(FPDF_BITMAP bitmap,
 
 // static
 void EmbedderTest::CompareBitmap(FPDF_BITMAP bitmap,
-                                 int expected_width,
-                                 int expected_height,
-                                 const char* expected_md5sum) {
-  ASSERT_EQ(expected_width, FPDFBitmap_GetWidth(bitmap));
-  ASSERT_EQ(expected_height, FPDFBitmap_GetHeight(bitmap));
+                                 std::string_view expectation_png_name) {
+  std::string png_path =
+      GetEmbedderTestPngExpectationPath(expectation_png_name);
+  SCOPED_TRACE(testing::Message() << "CompareBitmap() with " << png_path);
+  DiffOptions options = kExactDiffOptions;
+  if (EmbedderTestEnvironment::GetInstance()->fontations()) {
+    options = kFontationsDiffOptions;
+  }
+  CompareBitmapToPngFile(bitmap, png_path, options);
+  if (EmbedderTestEnvironment::GetInstance()->write_pngs()) {
+    WriteBitmapToPng(bitmap, png_path);
+  }
+}
 
-  // The expected stride is calculated using the same formula as in
-  // CFX_DIBitmap::CalculatePitchAndSize(), which sets the bitmap stride.
-  const int expected_stride =
-      (expected_width * GetBitmapBytesPerPixel(bitmap) * 8 + 31) / 32 * 4;
-  ASSERT_EQ(expected_stride, FPDFBitmap_GetStride(bitmap));
+// static
+void EmbedderTest::CompareBitmapWithExpectationSuffix(
+    FPDF_BITMAP bitmap,
+    std::string_view expectation_png_name,
+    const DiffOptions& options) {
+  DiffOptions effective_options = options;
+  if (EmbedderTestEnvironment::GetInstance()->fontations()) {
+    effective_options.max_pixel_per_channel_delta =
+        std::max(options.max_pixel_per_channel_delta,
+                 kFontationsDiffOptions.max_pixel_per_channel_delta);
+    effective_options.max_mean_squared_error =
+        std::max(options.max_mean_squared_error,
+                 kFontationsDiffOptions.max_mean_squared_error);
+    if (options.window_size > 0) {
+      effective_options.window_size =
+          std::max(options.window_size, kFontationsDiffOptions.window_size);
+      effective_options.max_window_mean_squared_error =
+          std::max(options.max_window_mean_squared_error,
+                   kFontationsDiffOptions.max_window_mean_squared_error);
+    }
+  }
+  std::vector<std::string> candidate_png_path =
+      GetEmbedderTestExpectationsWithSuffixPath(expectation_png_name);
+  for (const std::string& png_path : candidate_png_path) {
+    if (!CanReadFile(png_path.c_str())) {
+      continue;
+    }
 
-  if (!expected_md5sum) {
+    SCOPED_TRACE(testing::Message()
+                 << "CompareBitmapWithExpectationSuffix() with " << png_path);
+    CompareBitmapToPngFile(bitmap, png_path, effective_options);
+    if (EmbedderTestEnvironment::GetInstance()->write_pngs()) {
+      WriteBitmapToPng(bitmap, png_path);
+    }
     return;
   }
 
-  std::string actual_md5sum = HashBitmap(bitmap);
-  EXPECT_EQ(expected_md5sum, actual_md5sum);
-  if (EmbedderTestEnvironment::GetInstance()->write_pngs()) {
-    WriteBitmapToPng(bitmap, actual_md5sum + ".png");
+  ReportMissingExpectation(bitmap);
+}
+
+// static
+void EmbedderTest::CompareDisplayList(const std::string& display_list,
+                                      std::string_view expectation_name) {
+  std::string path =
+      GetEmbedderTestDisplayListExpectationPath(expectation_name);
+  SCOPED_TRACE(testing::Message() << "CompareDisplayList() with " << path);
+  std::vector<uint8_t> expected_data = GetFileContents(path.c_str());
+  if (expected_data.empty()) {
+    ADD_FAILURE() << "Missing or empty expectation file: " << path;
+    return;
   }
+  std::string_view expected_text(
+      reinterpret_cast<const char*>(expected_data.data()),
+      expected_data.size());
+  EXPECT_EQ(display_list, expected_text);
 }
 
 // static
@@ -880,7 +1349,7 @@ int EmbedderTest::GetBlockFromString(void* param,
   end += size;
   CHECK_LE(end.ValueOrDie(), new_file->size());
 
-  FXSYS_memcpy(buf, new_file->data() + pos, size);
+  UNSAFE_TODO(FXSYS_memcpy(buf, new_file->data() + pos, size));
   return 1;
 }
 
@@ -920,6 +1389,10 @@ EmbedderTest::ScopedSavedDoc::ScopedSavedDoc()
 
 EmbedderTest::ScopedSavedDoc::ScopedSavedDoc(EmbedderTest* test)
     : test_(test), doc_(test->OpenSavedDocument()) {}
+
+EmbedderTest::ScopedSavedDoc::ScopedSavedDoc(EmbedderTest* test,
+                                             const ByteString& password)
+    : test_(test), doc_(test->OpenSavedDocumentWithPassword(password)) {}
 
 EmbedderTest::ScopedSavedDoc::ScopedSavedDoc(ScopedSavedDoc&& that) noexcept
     : test_(std::move(that.test_)), doc_(std::exchange(that.doc_, nullptr)) {}

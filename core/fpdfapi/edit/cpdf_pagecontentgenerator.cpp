@@ -15,7 +15,6 @@
 #include <utility>
 
 #include "constants/page_object.h"
-#include "core/fpdfapi/edit/cpdf_contentstream_write_utils.h"
 #include "core/fpdfapi/edit/cpdf_pagecontentmanager.h"
 #include "core/fpdfapi/edit/cpdf_stringarchivestream.h"
 #include "core/fpdfapi/font/cpdf_truetypefont.h"
@@ -46,6 +45,8 @@
 #include "core/fxcrt/notreached.h"
 #include "core/fxcrt/numerics/safe_conversions.h"
 #include "core/fxcrt/span.h"
+#include "core/fxcrt/stream_write_utils.h"
+#include "core/fxcrt/zip.h"
 
 namespace {
 
@@ -620,7 +621,7 @@ const CPDF_ContentMarks* CPDF_PageContentGenerator::ProcessContentMarks(
         break;
       }
       case CPDF_ContentMarkItem::kPropertiesDict: {
-        *buf << "/" << item->GetPropertyName() << " ";
+        *buf << "/" << PDF_NameEncode(item->GetPropertyName()) << " ";
         break;
       }
       case CPDF_ContentMarkItem::kNone:
@@ -715,10 +716,7 @@ void CPDF_PageContentGenerator::ProcessForm(fxcrt::ostringstream* buf,
   }
 
   RetainPtr<const CPDF_Stream> pStream = pFormObj->form()->GetStream();
-  if (!pStream) {
-    return;
-  }
-
+  CHECK(pStream);
   ByteString name = RealizeResource(pStream.Get(), "XObject");
   pFormObj->SetResourceName(name);
 
@@ -743,8 +741,9 @@ void CPDF_PageContentGenerator::ProcessForm(fxcrt::ostringstream* buf,
 void CPDF_PageContentGenerator::ProcessPathPoints(fxcrt::ostringstream* buf,
                                                   CPDF_Path* pPath) {
   pdfium::span<const CFX_Path::Point> points = pPath->GetPoints();
-  if (pPath->IsRect()) {
-    CFX_PointF diff = points[2].point_ - points[0].point_;
+  std::optional<CFX_PointF> corner = pPath->GetRectOppositeCorner();
+  if (corner.has_value()) {
+    CFX_PointF diff = corner.value() - points[0].point_;
     WritePoint(*buf, points[0].point_) << " ";
     WritePoint(*buf, diff) << " re";
     return;
@@ -885,7 +884,7 @@ void CPDF_PageContentGenerator::ProcessGraphics(fxcrt::ostringstream* buf,
   if (maybe_name.has_value()) {
     name = std::move(maybe_name.value());
   } else {
-    auto gsDict = pdfium::MakeRetain<CPDF_Dictionary>();
+    auto gsDict = document_->New<CPDF_Dictionary>();
     if (graphD.fillAlpha != 1.0f) {
       gsDict->SetNewFor<CPDF_Number>("ca", graphD.fillAlpha);
     }
@@ -927,7 +926,7 @@ ByteString CPDF_PageContentGenerator::GetOrCreateDefaultGraphics() const {
     return maybe_name.value();
   }
 
-  auto gsDict = pdfium::MakeRetain<CPDF_Dictionary>();
+  auto gsDict = document_->New<CPDF_Dictionary>();
   gsDict->SetNewFor<CPDF_Number>("ca", defaultGraphics.fillAlpha);
   gsDict->SetNewFor<CPDF_Number>("CA", defaultGraphics.strokeAlpha);
   gsDict->SetNewFor<CPDF_Name>("BM", "Normal");
@@ -941,7 +940,7 @@ ByteString CPDF_PageContentGenerator::GetOrCreateDefaultGraphics() const {
 // Tm sets the text matrix (allows positioning and transforming text).
 // Tf sets the font name (from Font in Resources) and font size.
 // Tr sets the text rendering mode.
-// Tj sets the actual text, <####...> is used when specifying charcodes.
+// TJ sets the actual text, <####...> is used when specifying charcodes.
 void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
                                             CPDF_TextObject* pTextObj) {
   ProcessGraphics(buf, pTextObj);
@@ -980,7 +979,7 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
     RetainPtr<const CPDF_Object> pIndirectFont = font->GetFontDict();
     if (pIndirectFont->IsInline()) {
       // In this case we assume it must be a standard font
-      auto font_dict = pdfium::MakeRetain<CPDF_Dictionary>();
+      auto font_dict = document_->New<CPDF_Dictionary>();
       font_dict->SetNewFor<CPDF_Name>("Type", "Font");
       font_dict->SetNewFor<CPDF_Name>("Subtype", data.type);
       font_dict->SetNewFor<CPDF_Name>("BaseFont", data.baseFont);
@@ -999,12 +998,21 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
   *buf << "/" << PDF_NameEncode(dict_name) << " ";
   WriteFloat(*buf, pTextObj->GetFontSize()) << " Tf ";
   *buf << static_cast<int>(pTextObj->GetTextRenderMode()) << " Tr ";
+
+  *buf << "[";
   ByteString text;
-  for (uint32_t charcode : pTextObj->GetCharCodes()) {
-    if (charcode != CPDF_Font::kInvalidCharCode) {
-      font->AppendChar(&text, charcode);
+  for (auto [char_code, char_kerning] :
+       fxcrt::Zip(pTextObj->GetCharCodes(), pTextObj->GetCharKernings())) {
+    font->AppendChar(&text, char_code);
+    if (char_kerning != 0) {
+      *buf << PDF_HexEncodeString(text.AsStringView()) << " ";
+      text.clear();
+      WriteFloat(*buf, char_kerning) << " ";
     }
   }
-  *buf << PDF_HexEncodeString(text.AsStringView()) << " Tj ET";
+  if (!text.IsEmpty()) {
+    *buf << PDF_HexEncodeString(text.AsStringView());
+  }
+  *buf << "] TJ ET";
   EndProcessGraphics(*buf);
 }

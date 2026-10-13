@@ -63,7 +63,7 @@ bool SearchNode(pdfium::span<const uint8_t> glyph_span,
   return false;
 }
 
-FT_MM_Var* GetVariationDescriptor(FXFT_FaceRec* face) {
+FT_MM_Var* GetVariationDescriptor(FT_FaceRec* face) {
   FT_MM_Var* variation_desc = nullptr;
   FT_Get_MM_Var(face, &variation_desc);
   return variation_desc;
@@ -87,7 +87,7 @@ void FXFTMMVarDeleter::operator()(FT_MM_Var* variation_desc) {
                  variation_desc);
 }
 
-ScopedFXFTMMVar::ScopedFXFTMMVar(FXFT_FaceRec* face)
+ScopedFXFTMMVar::ScopedFXFTMMVar(FT_FaceRec* face)
     : variation_desc_(GetVariationDescriptor(face)),
       axis_(GetVariationAxis(variation_desc_.get())) {}
 
@@ -103,6 +103,28 @@ FT_Long ScopedFXFTMMVar::GetAxisMin(size_t index) const {
 
 FT_Long ScopedFXFTMMVar::GetAxisMax(size_t index) const {
   return axis_[index].maximum;
+}
+
+ScopedFXFTLibraryRec InitializeFreeType() {
+  FXFT_LibraryRec* ft_library = nullptr;
+  FT_Init_FreeType(&ft_library);
+  return ScopedFXFTLibraryRec(ft_library);
+}
+
+bool FreeTypeSetLcdFilterMode(FXFT_LibraryRec* ft_library) {
+  return FT_Library_SetLcdFilter(ft_library, FT_LCD_FILTER_DEFAULT) !=
+         FT_Err_Unimplemented_Feature;
+}
+
+bool FreeTypeVersionSupportsHinting(FXFT_LibraryRec* ft_library) {
+  FT_Int major;
+  FT_Int minor;
+  FT_Int patch;
+  FT_Library_Version(ft_library, &major, &minor, &patch);
+  // Freetype versions >= 2.8.1 support hinting even if subpixel rendering is
+  // disabled. https://sourceforge.net/projects/freetype/files/freetype2/2.8.1/
+  return major > 2 || (major == 2 && minor > 8) ||
+         (major == 2 && minor == 8 && patch >= 1);
 }
 
 int FXFT_unicode_from_adobe_name(const char* glyph_name) {

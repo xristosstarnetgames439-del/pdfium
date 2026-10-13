@@ -10,6 +10,7 @@
 #include <memory>
 #include <utility>
 
+#include "constants/catalog.h"
 #include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_cross_ref_avail.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
@@ -29,7 +30,6 @@
 #include "core/fxcrt/containers/contains.h"
 #include "core/fxcrt/fx_extension.h"
 #include "core/fxcrt/fx_safe_types.h"
-#include "core/fxcrt/notreached.h"
 #include "core/fxcrt/numerics/safe_conversions.h"
 #include "core/fxcrt/stl_util.h"
 
@@ -270,7 +270,7 @@ bool CPDF_DataAvail::CheckRoot() {
   }
 
   RetainPtr<const CPDF_Reference> pRef =
-      ToReference(root_->GetObjectFor("Pages"));
+      ToReference(root_->GetObjectFor(pdfium::catalog::kPages));
   if (!pRef) {
     internal_status_ = InternalStatus::kError;
     return false;
@@ -289,7 +289,7 @@ bool CPDF_DataAvail::PreparePageItem() {
   }
 
   RetainPtr<const CPDF_Reference> pRef =
-      ToReference(pRoot->GetObjectFor("Pages"));
+      ToReference(pRoot->GetObjectFor(pdfium::catalog::kPages));
   if (!pRef) {
     internal_status_ = InternalStatus::kError;
     return false;
@@ -1053,7 +1053,8 @@ CPDF_DataAvail::DocFormStatus CPDF_DataAvail::CheckAcroForm() {
       return kFormAvailable;
     }
 
-    RetainPtr<const CPDF_Object> pAcroForm = pRoot->GetObjectFor("AcroForm");
+    RetainPtr<const CPDF_Object> pAcroForm =
+        pRoot->GetObjectFor(pdfium::catalog::kAcroForm);
     if (!pAcroForm) {
       return kFormNotExist;
     }
@@ -1103,9 +1104,6 @@ CPDF_DataAvail::ParseDocument(
 
   // Additional check, that all ok.
   if (GetValidator()->has_read_problems()) {
-    // TODO(crbug.com/42271016): Figure out if this should be a CHECK() or the
-    // DCHECK() removed.
-    DCHECK(false);
     return std::make_pair(CPDF_Parser::HANDLER_ERROR, nullptr);
   }
 

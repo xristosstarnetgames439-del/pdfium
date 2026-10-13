@@ -16,6 +16,7 @@
 
 #include "core/fxcodec/jpx/jpx_decode_utils.h"
 #include "core/fxcrt/check_op.h"
+#include "core/fxcrt/fx_ceil_div.h"
 #include "core/fxcrt/fx_safe_types.h"
 #include "core/fxcrt/numerics/safe_conversions.h"
 #include "core/fxcrt/ptr_util.h"
@@ -155,7 +156,7 @@ void sycc444_to_rgb(opj_image_t* img) {
 
 bool sycc420_422_size_is_valid(pdfium::span<opj_image_comp_t> components) {
   return components[0].w != std::numeric_limits<OPJ_UINT32>::max() &&
-         (components[0].w + 1) / 2 == components[1].w &&
+         fxcrt::CeilDiv(components[0].w, 2) == components[1].w &&
          components[1].w == components[2].w &&
          components[1].h == components[2].h;
 }
@@ -163,7 +164,7 @@ bool sycc420_422_size_is_valid(pdfium::span<opj_image_comp_t> components) {
 bool sycc420_size_is_valid(pdfium::span<opj_image_comp_t> components) {
   return sycc420_422_size_is_valid(components) &&
          components[0].h != std::numeric_limits<OPJ_UINT32>::max() &&
-         (components[0].h + 1) / 2 == components[1].h;
+         fxcrt::CeilDiv(components[0].h, 2) == components[1].h;
 }
 
 bool sycc420_must_extend_cbcr(OPJ_UINT32 y, OPJ_UINT32 cbcr) {
@@ -589,7 +590,7 @@ bool CJPX_Decoder::Decode(pdfium::span<uint8_t> dest_buf,
   // the channels of the JPX image. They will contain more information besides
   // the color component data if `image_->numcomps` > `component_count`.
   // Currently only the color component data is used for rendering.
-  // TODO(crbug.com/pdfium/1747): Make full use of the component information.
+  // TODO(crbug.com/42270756): Make full use of the component information.
   std::ranges::fill(dest_buf.first(image_->comps[0].h * pitch), 0xff);
   std::vector<uint8_t*> channel_bufs(image_->numcomps);
   std::vector<int> adjust_comps(image_->numcomps);
